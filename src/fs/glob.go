@@ -2,6 +2,8 @@ package fs
 
 import (
 	"fmt"
+	"io/ioutil"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -84,48 +86,14 @@ func Glob(buildFileNames []string, rootPath string, includes, excludes []string,
 }
 
 func glob(rootPath string, glob string, excludes []string, buildFileNames []string, includeHidden bool) ([]string, error) {
-	p, err := patternToMatcher(rootPath, glob)
-	if err != nil {
-		return nil, err
-	}
-
-	var globMatches []string
-	var subPackages []string
-	err = Walk(rootPath, func(name string, isDir bool) error {
-		if isBuildFile(buildFileNames, name) {
-			packageName := filepath.Dir(name)
-			if packageName != rootPath {
-				subPackages = append(subPackages, packageName)
-				return filepath.SkipDir
-			}
-		}
-		match, err := p.Match(name)
-		if err != nil {
-			return err
-		}
-		if match {
-			globMatches = append(globMatches, name)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
+	globMatches, subPackages := internalGlob(rootPath, excludes, buildFileNames, filepath.Join(rootPath, glob))
 
 	var matches []string
 	for _, m := range globMatches {
-		if isInDirectories(m, subPackages) {
+		if isInDirectories(m, subPackages) || IsPackage(buildFileNames, m) {
 			continue
 		}
 		if !includeHidden && isHidden(m) {
-			continue
-		}
-
-		shouldExclude, err := shouldExcludeMatch(rootPath, m, excludes)
-		if err != nil {
-			return nil, err
-		}
-		if shouldExclude {
 			continue
 		}
 
@@ -191,4 +159,111 @@ func isInDirectories(name string, directories []string) bool {
 func isHidden(name string) bool {
 	file := filepath.Base(name)
 	return strings.HasPrefix(file, ".") || (strings.HasPrefix(file, "#") && strings.HasSuffix(file, "#"))
+}
+
+
+func internalGlob(rootPath string, excludes []string, buildFileNames []string, pattern string) ([]string, []string) {
+	dir, file := filepath.Split(pattern)
+
+	if !IsGlob(dir) {
+		return globDir(rootPath, dir, file, excludes, buildFileNames, nil, nil)
+	}
+
+	matchedDirs, subPackages := internalGlob(rootPath, excludes, buildFileNames, cleanGlobPath(dir))
+
+	var matches []string
+	for _, m := range matchedDirs {
+		matches, subPackages = globDir(rootPath, m, file, excludes, buildFileNames, matches, subPackages)
+	}
+	return matches, subPackages
+}
+
+// cleanGlobPath prepares path for glob matching.
+func cleanGlobPath(path string) string {
+	switch path {
+	case "":
+		return "."
+	case string(filepath.Separator):
+		// do nothing to the path
+		return path
+	default:
+		return path[0 : len(path)-1] // chop off trailing separator
+	}
+}
+
+func globDir(rootPath string, dir string, pattern string, excludes []string, buildFileNames []string, matches []string, subPackages []string) ([]string, []string) {
+	f, err := os.Stat(dir)
+	if err != nil {
+		panic(err)
+	}
+	if !f.IsDir() {
+		return matches, subPackages
+	}
+
+	var files []string
+	if strings.HasPrefix(pattern, "**") {
+		files, subPackages = ReadDirTree(dir, buildFileNames, subPackages)
+		pattern = strings.TrimPrefix(pattern, "*")
+	} else {
+		files = ReadDir(dir)
+	}
+
+	for _, f := range files {
+		if isBuildFile(buildFileNames, f) {
+			packageName := filepath.Dir(f)
+			if packageName == dir {
+				return matches, subPackages
+			}
+			subPackages = append(subPackages, packageName)
+		}
+
+		matched, err := filepath.Match(pattern, filepath.Base(f))
+		if err != nil {
+			panic(err)
+		}
+		if matched {
+			shouldExclude, err := shouldExcludeMatch(rootPath, f, excludes)
+			if err != nil {
+				panic(err)
+			}
+			if !shouldExclude {
+				matches = append(matches, f)
+			}
+		}
+	}
+
+	return matches, subPackages
+}
+
+func ReadDirTree(dir string, buildFileNames []string, subPackages []string) ([]string, []string) {
+	var files []string
+	err := Walk(dir, func(name string, isDir bool) error {
+		if dir == name {
+			return nil
+		}
+		if isBuildFile(buildFileNames, name) {
+			subPackages = append(subPackages, filepath.Dir(name))
+			return filepath.SkipDir
+		}
+		files = append(files, name)
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	return files, subPackages
+}
+
+func ReadDir(dir string) []string {
+	var files []string
+
+	fInfos, err := ioutil.ReadDir(dir)
+	if err != nil {
+		panic(err)
+	}
+	for _, info := range fInfos {
+		files = append(files, filepath.Join(dir, info.Name()))
+	}
+
+	return files
 }
