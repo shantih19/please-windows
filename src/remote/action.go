@@ -212,6 +212,7 @@ func (c *Client) uploadInputDir(ch chan<- *chunker.Chunker, target *core.BuildTa
 	b := newDirBuilder(c)
 	for input := range c.iterInputs(target, isTest, target.IsFilegroup) {
 		if l := input.Label(); l != nil {
+			//TODO(jpoole): test this to make sure that the output directory outputs are put into the correct place
 			o := c.targetOutputs(*l)
 			if o == nil {
 				if dep := c.state.Graph.TargetOrDie(*l); dep.Local {
@@ -482,7 +483,7 @@ func (c *Client) uploadLocalTarget(target *core.BuildTarget) error {
 	if err := c.client.UploadIfMissing(context.Background(), chomks...); err != nil {
 		return err
 	}
-	return c.setOutputs(target.Label, ar)
+	return c.setOutputs(target, ar)
 }
 
 // markOutputsAsExecutable updates an ActionResult for a binary rule.

@@ -7,7 +7,11 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -241,9 +245,10 @@ func (c *Client) Build(tid int, target *core.BuildTarget) (*core.BuildMetadata, 
 	if c.state.TargetHasher != nil {
 		c.state.TargetHasher.SetHash(target, hash)
 	}
-	if err := c.setOutputs(target.Label, ar); err != nil {
+	if err := c.setOutputs(target, ar); err != nil {
 		return metadata, c.wrapActionErr(err, digest)
 	}
+
 	if c.state.ShouldDownload(target) {
 		if !c.outputsExist(target, digest) {
 			c.state.LogBuildResult(tid, target.Label, core.TargetBuilding, "Downloading")
@@ -353,11 +358,87 @@ func (c *Client) reallyDownload(target *core.BuildTarget, digest *pb.Digest, ar 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.reqTimeout)
 	defer cancel()
-	if err := c.client.DownloadActionOutputs(ctx, ar, target.OutDir()); err != nil {
+
+	if err := c.downloadActionOutputs(ctx, ar, target); err != nil {
 		return c.wrapActionErr(err, digest)
 	}
 	c.recordAttrs(target, digest)
 	log.Debug("Downloaded outputs for %s", target)
+	return nil
+}
+
+func (c *Client) downloadActionOutputs(ctx context.Context, ar *pb.ActionResult, target *core.BuildTarget) error {
+	if len(target.OutputDirectories) == 0 {
+		return c.client.DownloadActionOutputs(ctx, ar, target.OutDir())
+	}
+
+	if err := c.client.DownloadActionOutputs(ctx, ar, target.TmpDir()); err != nil {
+		return err
+	}
+
+	if err := moveOutdirFilesToTmpRoot(target); err != nil {
+		return err
+	}
+
+	files, err := ioutil.ReadDir(target.TmpDir())
+	if err != nil {
+		return err
+	}
+
+	for _, f := range files {
+		oldFile, err := os.Open(filepath.Join(target.TmpDir(), f.Name()))
+		if err != nil {
+			return err
+		}
+		defer oldFile.Close()
+
+		newFile, err := os.Create(filepath.Join(target.OutDir(), f.Name()))
+		if err != nil {
+			panic("5: " + err.Error())
+
+			return err
+		}
+		defer newFile.Close()
+
+		if _, err := io.Copy(oldFile, newFile); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// moveOutdirFilesToTmpRoot moves all the files from the output dirs into the root of the build temp dir
+func moveOutdirFilesToTmpRoot(target *core.BuildTarget) error {
+	for _, dir := range target.OutputDirectories {
+		if err := addOutputDirectoryToTmpRoot(target, dir); err != nil {
+			return fmt.Errorf("failed to move output dir (%s) contents to rule root: %w", dir, err)
+		}
+		if err := os.Remove(filepath.Join(target.TmpDir(), dir)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func addOutputDirectoryToTmpRoot(target *core.BuildTarget, dir string) error {
+	fullDir := filepath.Join(target.TmpDir(), dir)
+
+	files, err := ioutil.ReadDir(fullDir)
+	if err != nil {
+		return err
+	}
+
+	var outs []string
+	for _, f := range files {
+		from := filepath.Join(fullDir, f.Name())
+		to := filepath.Join(target.TmpDir(), f.Name())
+
+		if err := os.Rename(from, to); err != nil {
+			return err
+		}
+
+		outs = append(outs, f.Name())
+	}
 	return nil
 }
 

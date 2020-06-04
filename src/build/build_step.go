@@ -287,11 +287,8 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 			return err
 		}
 	}
-	if len(target.OutputDirectories) > 0 {
-		if runRemotely {
-			// TODO(jpoole): implement remote execution for output directories
-			panic("remote execution is not supported for output directories yet")
-		}
+	// The remote action will set the output directory outs here
+	if !runRemotely {
 		metadata.OutputDirOuts, err = addOutputDirectoriesToBuildOutput(target)
 		if err != nil {
 			return err
@@ -525,7 +522,7 @@ func addOutputDirectoriesToBuildOutput(target *core.BuildTarget) ([]string, erro
 	for _, dir := range target.OutputDirectories {
 		o, err := addOutputDirectoryToBuildOutput(target, dir)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to move output dir (%s) contents to rule root: %w", dir, err)
 		}
 		outs = append(outs, o...)
 	}
