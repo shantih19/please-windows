@@ -180,7 +180,6 @@ func (graph *BuildGraph) PackageMap() map[string]*Package {
 }
 
 // NewGraph constructs and returns a new BuildGraph.
-// Users should not attempt to construct one themselves.
 func NewGraph() *BuildGraph {
 	return &BuildGraph{}
 }
