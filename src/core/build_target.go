@@ -194,8 +194,6 @@ type BuildTarget struct {
 	OutputDirectories []OutputDirectory `name:"output_dirs"`
 	// RuleMetadata is the metadata attached to this build rule. It can be accessed through the "get_rule_metadata" BIF.
 	RuleMetadata interface{} `name:"config"`
-	// List of reverse dependencies of this target
-	reverseDeps []*BuildTarget `print:"false"`
 	// Used to arbitrate concurrent access to dependencies
 	mutex sync.Mutex `print:"false"`
 	// Used to notify once all dependencies are registered.
