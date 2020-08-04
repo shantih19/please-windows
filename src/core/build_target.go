@@ -194,6 +194,12 @@ type BuildTarget struct {
 	OutputDirectories []OutputDirectory `name:"output_dirs"`
 	// RuleMetadata is the metadata attached to this build rule. It can be accessed through the "get_rule_metadata" BIF.
 	RuleMetadata interface{} `name:"config"`
+	// Used to arbitrate concurrent access to dependencies
+	mutex sync.Mutex `print:"false"`
+	// Used to notify once all dependencies are registered.
+	dependenciesRegistered chan struct{} `print:"false"`
+	// Used to notify once this target has built successfully.
+	finishedBuilding chan struct{} `print:"false"`
 }
 
 // BuildMetadata is temporary metadata that's stored around a build target - we don't
@@ -314,9 +320,11 @@ func (s BuildTargetState) String() string {
 // NewBuildTarget constructs & returns a new BuildTarget.
 func NewBuildTarget(label BuildLabel) *BuildTarget {
 	return &BuildTarget{
-		Label:               label,
-		state:               int32(Inactive),
-		BuildingDescription: DefaultBuildingDescription,
+		Label:                  label,
+		state:                  int32(Inactive),
+		BuildingDescription:    DefaultBuildingDescription,
+		dependenciesRegistered: make(chan struct{}),
+		finishedBuilding:       make(chan struct{}),
 	}
 }
 
@@ -445,6 +453,8 @@ func (target *BuildTarget) AllURLs(config *Configuration) []string {
 
 // DeclaredDependencies returns all the targets this target declared any kind of dependency on (including sources and tools).
 func (target *BuildTarget) DeclaredDependencies() []BuildLabel {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	ret := make(BuildLabels, len(target.dependencies))
 	for i, dep := range target.dependencies {
 		ret[i] = dep.declared
@@ -455,6 +465,8 @@ func (target *BuildTarget) DeclaredDependencies() []BuildLabel {
 
 // DeclaredDependenciesStrict returns the original declaration of this target's dependencies.
 func (target *BuildTarget) DeclaredDependenciesStrict() []BuildLabel {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	ret := make(BuildLabels, 0, len(target.dependencies))
 	for _, dep := range target.dependencies {
 		if !dep.exported && !dep.source && !target.IsTool(dep.declared) {
@@ -467,6 +479,8 @@ func (target *BuildTarget) DeclaredDependenciesStrict() []BuildLabel {
 
 // Dependencies returns the resolved dependencies of this target.
 func (target *BuildTarget) Dependencies() []*BuildTarget {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	ret := make(BuildTargets, 0, len(target.dependencies))
 	for _, deps := range target.dependencies {
 		for _, dep := range deps.deps {
@@ -479,6 +493,8 @@ func (target *BuildTarget) Dependencies() []*BuildTarget {
 
 // ExternalDependencies returns the non-internal dependencies of this target (i.e. not "_target#tag" ones).
 func (target *BuildTarget) ExternalDependencies() []*BuildTarget {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	ret := make(BuildTargets, 0, len(target.dependencies))
 	for _, deps := range target.dependencies {
 		for _, dep := range deps.deps {
@@ -495,6 +511,8 @@ func (target *BuildTarget) ExternalDependencies() []*BuildTarget {
 
 // BuildDependencies returns the build-time dependencies of this target (i.e. not data and not internal).
 func (target *BuildTarget) BuildDependencies() []*BuildTarget {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	ret := make(BuildTargets, 0, len(target.dependencies))
 	for _, deps := range target.dependencies {
 		if !deps.data && !deps.internal {
@@ -509,6 +527,8 @@ func (target *BuildTarget) BuildDependencies() []*BuildTarget {
 
 // ExportedDependencies returns any exported dependencies of this target.
 func (target *BuildTarget) ExportedDependencies() []BuildLabel {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	ret := make(BuildLabels, 0, len(target.dependencies))
 	for _, info := range target.dependencies {
 		if info.exported {
@@ -520,14 +540,57 @@ func (target *BuildTarget) ExportedDependencies() []BuildLabel {
 
 // DependenciesFor returns the dependencies that relate to a given label.
 func (target *BuildTarget) DependenciesFor(label BuildLabel) []*BuildTarget {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
+	return target.dependenciesFor(label)
+}
+
+func (target *BuildTarget) dependenciesFor(label BuildLabel) []*BuildTarget {
 	if info := target.dependencyInfo(label); info != nil {
 		return info.deps
 	} else if target.Label.Subrepo != "" && label.Subrepo == "" {
 		// Can implicitly use the target's subrepo.
 		label.Subrepo = target.Label.Subrepo
-		return target.DependenciesFor(label)
+		return target.dependenciesFor(label)
 	}
 	return nil
+}
+
+// registerDependencies runs through all the target's dependencies and waits for them to be added to the build graph.
+func (target *BuildTarget) registerDependencies(graph *BuildGraph) {
+	// TODO(peterebden): can we do something with the mutex here? I don't *think* it's a problem
+	//                   but would be nice if the race detector could verify that.
+	for i := range target.dependencies {
+		info := &target.dependencies[i]
+		t := graph.WaitForTarget(info.declared)
+		if t == nil {
+			continue // This doesn't exist; that will get handled later.
+		}
+		info.resolved = true
+		if deps := t.ProvideFor(target); len(deps) == 1 && deps[0].Label() != nil && *deps[0].Label() == t.Label {
+			info.deps = []*BuildTarget{t} // small optimisation to save looking this thing up again in the common case
+		} else {
+			for _, l := range deps {
+				t := graph.WaitForTarget(l)
+				if t == nil {
+					info.resolved = false
+					continue
+				}
+				info.deps = append(info.deps, t)
+			}
+		}
+	}
+	close(target.dependenciesRegistered)
+}
+
+// FinishBuild marks this target as having built.
+func (target *BuildTarget) FinishBuild() {
+	close(target.finishedBuilding)
+}
+
+// WaitForBuild blocks until this target has finished building.
+func (target *BuildTarget) WaitForBuild() {
+	<-target.finishedBuilding
 }
 
 // DeclaredOutputs returns the outputs from this target's original declaration.
@@ -667,12 +730,14 @@ func (target *BuildTarget) sourcePaths(graph *BuildGraph, source BuildInput, f b
 	return f(source, graph)
 }
 
-// allDepsBuilt returns true if all the dependencies of a target are built.
-func (target *BuildTarget) allDepsBuilt() bool {
-	if !target.allDependenciesResolved() {
-		return false // Target still has some deps pending parse.
-	}
+// AllDepsBuilt returns true if all the dependencies of a target are built.
+func (target *BuildTarget) AllDepsBuilt() bool {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	for _, deps := range target.dependencies {
+		if !deps.resolved {
+			return false
+		}
 		for _, dep := range deps.deps {
 			if dep.State() < Built {
 				return false
@@ -682,15 +747,52 @@ func (target *BuildTarget) allDepsBuilt() bool {
 	return true
 }
 
-// allDependenciesResolved returns true once all the dependencies of a target have been
-// parsed and resolved to real targets.
-func (target *BuildTarget) allDependenciesResolved() bool {
+// UnbuiltDeps returns the dependencies of this target that have not yet built.
+func (target *BuildTarget) UnbuiltDeps() []string {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
+	ret := []string{}
 	for _, deps := range target.dependencies {
 		if !deps.resolved {
-			return false
+			ret = append(ret, deps.declared.String()+" (unresolved)")
+		} else {
+			for _, dep := range deps.deps {
+				if dep.State() < Built {
+					ret = append(ret, dep.Label.String())
+				}
+			}
 		}
 	}
-	return true
+	return ret
+}
+
+// AllDependenciesResolved returns true once all the dependencies of a target have been
+// parsed and resolved to real targets.
+func (target *BuildTarget) AllDependenciesResolved() bool {
+	return len(target.UnresolvedDependencies()) == 0
+}
+
+// UnresolvedDependencies returns the list of dependencies for this target that aren't resolved yet.
+func (target *BuildTarget) UnresolvedDependencies() BuildLabels {
+	ret := []BuildLabel{}
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
+	for _, deps := range target.dependencies {
+		if !deps.resolved {
+			ret = append(ret, deps.declared)
+		}
+	}
+	return ret
+}
+
+// WaitForResolvedDependencies blocks until all the dependencies are resolved, or we know they cannot be.
+// It returns an error if they cannot be successfully resolved.
+func (target *BuildTarget) WaitForResolvedDependencies() error {
+	<-target.dependenciesRegistered
+	if !target.AllDependenciesResolved() {
+		return fmt.Errorf("Failed to resolve some dependencies for %s: %s", target, target.UnresolvedDependencies())
+	}
+	return nil
 }
 
 // CanSee returns true if target can see the given dependency, or false if not.
@@ -837,17 +939,24 @@ func (target *BuildTarget) AllSecrets() []string {
 
 // HasDependency checks if a target already depends on this label.
 func (target *BuildTarget) HasDependency(label BuildLabel) bool {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	return target.dependencyInfo(label) != nil
 }
 
 // hasResolvedDependency returns true if a particular dependency has been resolved to real targets yet.
 func (target *BuildTarget) hasResolvedDependency(label BuildLabel) bool {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	info := target.dependencyInfo(label)
 	return info != nil && info.resolved
 }
 
 // resolveDependency resolves a particular dependency on a target.
 func (target *BuildTarget) resolveDependency(label BuildLabel, dep *BuildTarget) {
+	// Important we acquire both mutexes here so the resolution & revdeps are done atomically.
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	info := target.dependencyInfo(label)
 	if info == nil {
 		target.dependencies = append(target.dependencies, depInfo{declared: label})
@@ -979,6 +1088,8 @@ func (target *BuildTarget) AddProvide(language string, label BuildLabel) {
 
 // ProvideFor returns the build label that we'd provide for the given target.
 func (target *BuildTarget) ProvideFor(other *BuildTarget) []BuildLabel {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	ret := []BuildLabel{}
 	if target.Provides != nil && len(other.Requires) != 0 {
 		// Never do this if the other target has a data or tool dependency on us.

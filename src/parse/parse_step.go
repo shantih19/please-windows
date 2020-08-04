@@ -204,7 +204,7 @@ func parsePackage(state *core.BuildState, label, dependent core.BuildLabel, subr
 	// Verify some details of the output files in the background. Don't need to wait for this
 	// since it only issues warnings sometimes.
 	go pkg.VerifyOutputs()
-	state.Graph.AddPackage(pkg) // Calling this means nobody else will add entries to pendingTargets for this package.
+	state.Graph.AddPackage(pkg)
 	return pkg, nil
 }
 
@@ -233,11 +233,6 @@ func buildFileName(state *core.BuildState, pkgName string, subrepo *core.Subrepo
 func rescanDeps(state *core.BuildState, changed map[*core.BuildTarget]struct{}) error {
 	// Run over all the changed targets in this package and ensure that any newly added dependencies enter the build queue.
 	for target := range changed {
-		if !state.Graph.AllDependenciesResolved(target) {
-			for _, dep := range target.DeclaredDependencies() {
-				state.Graph.AddDependency(target.Label, dep)
-			}
-		}
 		if s := target.State(); s < core.Built && s > core.Inactive {
 			if err := state.QueueTarget(target.Label, core.OriginalTarget, true, false); err != nil {
 				return err

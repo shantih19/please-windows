@@ -220,6 +220,7 @@ type stateProgress struct {
 	numRunning int64
 	numDone    int64
 	mutex      sync.Mutex
+	closeOnce  sync.Once
 	// Used to track subinclude() calls that block until targets are built.
 	pendingTargets     map[BuildLabel]chan struct{}
 	pendingTargetMutex sync.Mutex
@@ -269,8 +270,8 @@ func (state *BuildState) AddPendingParse(label, dependent BuildLabel, forSubincl
 	}
 }
 
-// AddPendingBuild adds a task for a pending build of a target.
-func (state *BuildState) AddPendingBuild(label BuildLabel, forSubinclude bool) {
+// addPendingBuild adds a task for a pending build of a target.
+func (state *BuildState) addPendingBuild(label BuildLabel, forSubinclude bool) {
 	if forSubinclude {
 		state.addPending(label, SubincludeBuild)
 	} else {
@@ -380,7 +381,9 @@ func (state *BuildState) KillAll() {
 // CloseResults closes the result channels.
 func (state *BuildState) CloseResults() {
 	if state.results != nil {
-		close(state.results)
+		state.progress.closeOnce.Do(func() {
+			close(state.results)
+		})
 	}
 }
 
@@ -761,6 +764,11 @@ func (state *BuildState) QueueTarget(label, dependent BuildLabel, rescan, forceB
 			return fmt.Errorf("Target %s (referenced by %s) doesn't exist", label, dependent)
 		}
 	}
+	return state.queueTarget(target, dependent, rescan, forceBuild)
+}
+
+// queueTarget is like QueueTarget but once we have a resolved target.
+func (state *BuildState) queueTarget(target *BuildTarget, dependent BuildLabel, rescan, forceBuild bool) error {
 	if target.State() >= Active && !rescan && !forceBuild {
 		return nil // Target is already tagged to be built and likely on the queue.
 	}
@@ -780,35 +788,51 @@ func (state *BuildState) QueueTarget(label, dependent BuildLabel, rescan, forceB
 					atomic.AddInt64(&state.progress.numActive, int64(state.NumTestRuns))
 				}
 			}
-		}
-	}
-	// If this target has no deps, add it to the queue now, otherwise handle its deps.
-	// Only add if we need to build targets (not if we're just parsing) but we might need it to parse...
-	if target.State() == Active && state.Graph.AllDepsBuilt(target) {
-		if target.SyncUpdateState(Active, Pending) {
-			state.AddPendingBuild(label, dependent.IsAllTargets())
-		}
-		if !rescan {
-			return nil
-		}
-	}
-	for _, dep := range target.DeclaredDependencies() {
-		// Check the require/provide stuff; we may need to add a different target.
-		if len(target.Requires) > 0 {
-			if depTarget := state.Graph.Target(dep); depTarget != nil && len(depTarget.Provides) > 0 {
-				for _, provided := range depTarget.ProvideFor(target) {
-					if err := state.QueueTarget(provided, label, false, forceBuild); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-		}
-		if err := state.QueueTarget(dep, label, false, forceBuild); err != nil {
-			return err
+			// Actual queuing stuff now happens asynchronously in here.
+			atomic.AddInt64(&state.progress.numActive, 1)
+			atomic.AddInt64(&state.progress.numPending, 1)
+			go state.queueTargetAsync(target, dependent, rescan, forceBuild)
 		}
 	}
 	return nil
+}
+
+// queueTarget enqueues a target's dependencies and the target itself once they are done.
+func (state *BuildState) queueTargetAsync(target *BuildTarget, dependent BuildLabel, rescan, forceBuild bool) {
+	defer state.TaskDone(false)
+	for _, dep := range target.DeclaredDependencies() {
+		if err := state.QueueTarget(dep, target.Label, rescan, forceBuild); err != nil {
+			state.asyncError(dep, err)
+			return
+		}
+	}
+	// TODO(peterebden): This is slightly inefficient in that we wait for all dependencies to resolve before
+	//                   queuing up the actual build actions. Would be better to do both at once.
+	if err := target.WaitForResolvedDependencies(); err != nil {
+		state.asyncError(target.Label, err)
+		return
+	}
+	deps := target.Dependencies()
+	for _, dep := range deps {
+		if err := state.queueTarget(dep, target.Label, rescan, forceBuild); err != nil {
+			state.asyncError(target.Label, err)
+			return
+		}
+	}
+	// Now wait for each of them to finish building
+	for _, dep := range deps {
+		dep.WaitForBuild()
+	}
+	if target.SyncUpdateState(Active, Pending) {
+		state.addPendingBuild(target.Label, dependent.IsAllTargets())
+	}
+}
+
+// asyncError reports an error that's happened in an asynchronous function.
+func (state *BuildState) asyncError(label BuildLabel, err error) {
+	log.Error("Error queuing %s: %s", label, err)
+	state.LogBuildError(0, label, TargetBuildFailed, err, "")
+	state.KillAll()
 }
 
 // ForTarget returns the state associated with a given target.
