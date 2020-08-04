@@ -808,6 +808,7 @@ func (state *BuildState) queueTargetAsync(target *BuildTarget, dependent BuildLa
 	}
 	// TODO(peterebden): This is slightly inefficient in that we wait for all dependencies to resolve before
 	//                   queuing up the actual build actions. Would be better to do both at once.
+	cli.TargetLogger.Log(target.Label, "waiting for resolved deps")
 	if err := target.WaitForResolvedDependencies(); err != nil {
 		state.asyncError(target.Label, err)
 		return
@@ -821,11 +822,13 @@ func (state *BuildState) queueTargetAsync(target *BuildTarget, dependent BuildLa
 	}
 	// Now wait for each of them to finish building
 	for _, dep := range deps {
+		cli.TargetLogger.Log(target.Label, "waiting for build %v", dep.Label)
 		dep.WaitForBuild()
 	}
 	if target.SyncUpdateState(Active, Pending) {
 		state.addPendingBuild(target.Label, dependent.IsAllTargets())
 	}
+	cli.TargetLogger.Done(target.Label)
 }
 
 // asyncError reports an error that's happened in an asynchronous function.
