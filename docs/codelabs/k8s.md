@@ -107,7 +107,12 @@ RUN apk update && apk add python3
 Unlike `python_lbrary()` the docker image build rules aren't built in. They are part of the extra rules found in the 
 [pleasings](https://github.com/thought-machine/pleasings/tree/master/docker) repository. 
 
-Let's create `common/docker/BUILD` to build our docker image:
+To add pleasings to your project, we need to add a `github_repo()` rule to the root of our project. To do this run:
+`$ plz init pleasings`
+
+You will see there's not a BUILD file in the root of the repo with a `:pleasings` target. 
+
+Great! So let's use that to create `common/docker/BUILD` to build our docker image:
 
 ```python
 subinclude("///pleasings//docker")
