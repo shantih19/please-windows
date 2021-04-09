@@ -371,7 +371,7 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 	}
 	// Clean up the temporary directory once it's done.
 	if state.CleanWorkdirs {
-		if err := os.RemoveAll(target.TmpDir()); err != nil {
+		if err := fs.ForceRemoveAll(target.TmpDir()); err != nil {
 			log.Warning("Failed to remove temporary directory for %s: %s", target.Label, err)
 		}
 	}
@@ -525,7 +525,7 @@ func prepareDirectories(target *core.BuildTarget) error {
 
 func prepareDirectory(directory string, remove bool) error {
 	if remove && core.PathExists(directory) {
-		if err := os.RemoveAll(directory); err != nil {
+		if err := fs.ForceRemoveAll(directory); err != nil {
 			return err
 		}
 	}
