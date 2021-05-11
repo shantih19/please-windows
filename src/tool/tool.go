@@ -61,14 +61,18 @@ func Run(config *core.Configuration, tool Tool, args []string) {
 
 // matchingTools returns a set of matching tools for a string prefix.
 func matchingTools(config *core.Configuration, prefix string) map[string]string {
+	sandboxTool := config.Sandbox.Tool
+	if config.Sandbox.Tool == "" {
+		sandboxTool = "//_please:please_sandbox"
+	}
 	knownTools := map[string]string{
 		"jarcat":      config.Java.JarCatTool,
 		"javacworker": config.Java.JavacWorker,
 		"junitrunner": config.Java.JUnitRunner,
-		"langserver":  "build_langserver",
-		"lps":         "build_langserver",
+		"langserver":  "//_please:build_langserver",
+		"lps":         "//_please:build_langserver",
 		"pex":         config.Python.PexTool,
-		"sandbox":     "please_sandbox",
+		"sandbox":     sandboxTool,
 	}
 	ret := map[string]string{}
 	for k, v := range knownTools {
