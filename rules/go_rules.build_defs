@@ -179,6 +179,22 @@ def go_library(name:str, srcs:list, resources:list=None, asm_srcs:list=None, hdr
             # Libraries that are in a directory not of their own name will need the sources in
             # a subdirectory for go to be able to transparently import them.
             src_labels += [f'link:plz-out/go/src/$PKG/{libname}']
+
+    provides = {"go": f":{name}"}
+    if cover:
+        provides["cover_vars"] = build_rule(
+            name = name,
+            tag = "cover_vars",
+            srcs = srcs,
+            cmd = "echo $SRCS | xargs -n 1 | xargs -i echo coverVar {}=%s > $OUT" % package_path,
+            outs = [f"{package}.covervars"],
+            visibility = visibility,
+            test_only = test_only,
+            labels = labels,
+            requires = ["cover_vars"],
+            deps = deps,
+        )
+
     if asm_srcs:
         abi_rule = build_rule(
             name = name,
@@ -224,6 +240,7 @@ def go_library(name:str, srcs:list, resources:list=None, asm_srcs:list=None, hdr
             test_only = test_only,
             labels=labels,
         )
+        provides["go_src"] = lib_rule
         return build_rule(
             name = name,
             srcs = {
@@ -237,7 +254,7 @@ def go_library(name:str, srcs:list, resources:list=None, asm_srcs:list=None, hdr
             building_description = 'Packing...',
             requires = ['go'],
             labels = labels+link_labels,
-            provides =  {'go': ':' + name, 'go_src': lib_rule},
+            provides =  provides,
             test_only = test_only,
             exported_deps = exported_deps,
             deps = deps,
@@ -273,7 +290,7 @@ def go_library(name:str, srcs:list, resources:list=None, asm_srcs:list=None, hdr
     else:
         outs = [out]
 
-
+    provides["go_src"] = src_rule
     return build_rule(
         name=name,
         srcs=srcs,
@@ -284,7 +301,7 @@ def go_library(name:str, srcs:list, resources:list=None, asm_srcs:list=None, hdr
         visibility=visibility,
         building_description="Compiling...",
         requires=['go'],
-        provides={'go': ':' + name, 'go_src': src_rule},
+        provides=provides,
         labels = labels+link_labels + [f"go_package:{package_path}"] if _generate_import_config else [],
         test_only=test_only,
         tools=tools,
@@ -873,10 +890,10 @@ def go_test_main(name:str, srcs:list, test_package:str="", test_only:bool=False,
         tag = _tag,
         srcs = srcs,
         outs = [name + '_main.go'],
-        deps = deps,
+        deps = deps if CONFIG.BUILD_CONFIG == "cover" else [],
         cmd = cmds,
         needs_transitive_deps = CONFIG.BUILD_CONFIG == "cover",  # Need all dependencies to template coverage variables
-        requires = ['go', 'go_src'] if CONFIG.BUILD_CONFIG == "cover" else ['go'],
+        requires = ['cover_vars'] if CONFIG.BUILD_CONFIG == "cover" else [],
         test_only = test_only,
         tools = [CONFIG.PLEASE_GO_TOOL],
         post_build = _post_build,
