@@ -54,8 +54,8 @@ type Task struct {
 type Parser interface {
 	// ParseFile parses a single BUILD file into the given package.
 	ParseFile(state *BuildState, pkg *Package, filename string) error
-	// Preload loads a file as a preloaded build definition
-	Preload(filename string)
+	// PreloadSubinclude loads a file as a preloaded build definition
+	PreloadSubinclude(state *BuildState, target *BuildTarget)
 	// ParseReader parses a single BUILD file into the given package.
 	ParseReader(state *BuildState, pkg *Package, reader io.ReadSeeker) error
 	// RunPreBuildFunction runs a pre-build function for a target.
@@ -563,10 +563,7 @@ func (state *BuildState) WaitForPreloadedSubincludes() {
 		// Preload them in order to avoid non-deterministic errors when the subincludes depend on each other
 		for _, inc := range state.Config.Parse.PreloadSubincludes {
 			t := state.WaitForTargetAndEnsureDownload(inc, OriginalTarget)
-
-			for _, out := range t.FullOutputs() {
-				state.Parser.Preload(out)
-			}
+			state.Parser.PreloadSubinclude(state, t)
 		}
 
 		state.FinishedPreloading = true
@@ -786,7 +783,7 @@ func (state *BuildState) SyncParsePackage(label BuildLabel) *Package {
 	return state.Graph.PackageByLabel(label) // Important to check again; it's possible to race against this whole lot.
 }
 
-// WaitForPackage is similar to WaitForBuiltTarget however
+// WaitForPackage is similar to WaitForBuiltTarget however it waits for the given package to be parsed
 func (state *BuildState) WaitForPackage(l, dependent BuildLabel) *Package {
 	if p := state.Graph.PackageByLabel(l); p != nil {
 		return p

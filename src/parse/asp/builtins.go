@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -267,7 +268,7 @@ func bazelLoad(s *scope, args []pyObject) pyObject {
 	if l.Subrepo != "" {
 		subrepo := s.state.Graph.Subrepo(l.Subrepo)
 		if subrepo == nil || (subrepo.Target != nil && subrepo != s.contextPkg.Subrepo) {
-			subincludeTarget(s, l)
+			subincludeTarget(s, l, s.contextPkg.Label())
 			subrepo = s.state.Graph.SubrepoOrDie(l.Subrepo)
 		}
 		filename = subrepo.Dir(filename)
@@ -291,26 +292,35 @@ func builtinFail(s *scope, args []pyObject) pyObject {
 }
 
 func subinclude(s *scope, args []pyObject) pyObject {
-	s.NAssert(s.contextPkg == nil, "Cannot subinclude() from this context")
+	if s.state.FinishedPreloading {
+		s.NAssert(s.contextPkg == nil, "Cannot subinclude() from this context")
+	}
+
 	for _, arg := range args {
-		t := subincludeTarget(s, core.ParseBuildLabelContext(string(arg.(pyString)), s.contextPkg))
-		pkg := s.contextPkg
-		if t.Subrepo != s.contextPkg.Subrepo && t.Subrepo != nil {
-			pkg = &core.Package{
-				Name:        "@" + t.Subrepo.Name,
-				SubrepoName: t.Subrepo.Name,
-				Subrepo:     t.Subrepo,
+		var t *core.BuildTarget
+		var pkg *core.Package
+
+		if !s.state.FinishedPreloading {
+			t = subincludeTarget(s, core.ParseBuildLabel(string(arg.(pyString)), ""), core.OriginalTarget)
+		} else {
+			t := subincludeTarget(s, core.ParseBuildLabelContext(string(arg.(pyString)), s.contextPkg), s.contextPkg.Label())
+			pkg = s.contextPkg
+			if t.Subrepo != s.contextPkg.Subrepo && t.Subrepo != nil {
+				pkg = &core.Package{
+					Name:        "@" + t.Subrepo.Name,
+					SubrepoName: t.Subrepo.Name,
+					Subrepo:     t.Subrepo,
+				}
 			}
+			s.Assert(pkg.Label().CanSee(s.state, t), "Target %s isn't visible to be subincluded into %s", t.Label, pkg.Label())
 		}
-		l := pkg.Label()
-		s.Assert(l.CanSee(s.state, t), "Target %s isn't visible to be subincluded into %s", t.Label, l)
+
 
 		incPkgState := s.state
 		if t.Label.Subrepo != "" {
 			incPkgState = s.state.Graph.SubrepoOrDie(t.Label.Subrepo).State
 		}
 		loadPluginConfig(incPkgState, s.state, s.config)
-
 		for _, out := range t.Outputs() {
 			s.SetAll(s.interpreter.Subinclude(path.Join(t.OutDir(), out), t.Label, pkg), false)
 		}
@@ -320,14 +330,13 @@ func subinclude(s *scope, args []pyObject) pyObject {
 
 // subincludeTarget returns the target for a subinclude() call to a label.
 // It blocks until the target exists and is built.
-func subincludeTarget(s *scope, l core.BuildLabel) *core.BuildTarget {
-	pkgLabel := s.contextPkg.Label()
+func subincludeTarget(s *scope, l, pkgLabel core.BuildLabel) *core.BuildTarget {
 	if l.Subrepo == pkgLabel.Subrepo && l.PackageName == pkgLabel.PackageName {
 		// This is a subinclude in the same package, check the target exists.
 		s.NAssert(s.contextPkg.Target(l.Name) == nil, "Target :%s is not defined in this package; it has to be defined before the subinclude() call", l.Name)
 	}
-	s.NAssert(l.IsPseudoTarget(), "Can't pass :all or /... to subinclude()")
 
+	log.Warningf("subincluding %v form %v", l, pkgLabel)
 	// If we're including from a subrepo, or if we're in a subrepo and including from a different subrepo, make sure
 	// that package is parsed to avoid locking. Locks can occur when the target's package also subincludes that target.
 	//
@@ -335,7 +344,7 @@ func subincludeTarget(s *scope, l core.BuildLabel) *core.BuildTarget {
 	//
 	// By parsing the package first, the subrepo package's subinclude will queue the subrepo target to be built before
 	// we call WaitForSubincludedTarget below avoiding the lockup.
-	if l.Subrepo != "" && l.SubrepoLabel().PackageName != s.contextPkg.Name && l.Subrepo != s.contextPkg.SubrepoName {
+	if l.Subrepo != "" && l.SubrepoLabel().PackageName != pkgLabel.PackageName && l.Subrepo != pkgLabel.Subrepo {
 		subrepoPackageLabel := core.BuildLabel{
 			PackageName: l.SubrepoLabel().PackageName,
 			Subrepo:     l.SubrepoLabel().Subrepo,
@@ -346,9 +355,11 @@ func subincludeTarget(s *scope, l core.BuildLabel) *core.BuildTarget {
 	// Temporarily release the parallelism limiter; this is important to keep us from deadlocking
 	// all available parser threads (easy to happen if they're all waiting on a single target which now can't start)
 	t := s.WaitForSubincludedTarget(l, pkgLabel)
-	// This is not quite right, if you subinclude from another subinclude we can basically
-	// lose track of it later on. It's hard to know what better to do at this point though.
-	s.contextPkg.RegisterSubinclude(l)
+	if s.state.FinishedPreloading {
+		// This is not quite right, if you subinclude from another subinclude we can basically
+		// lose track of it later on. It's hard to know what better to do at this point though.
+		s.contextPkg.RegisterSubinclude(l)
+	}
 	return t
 }
 
@@ -991,7 +1002,7 @@ func selectTarget(s *scope, l core.BuildLabel) *core.BuildTarget {
 		s.NAssert(t == nil, "Target %s in select() call has not been defined yet", l.Name)
 		return t
 	}
-	return subincludeTarget(s, l)
+	return subincludeTarget(s, l, s.contextPkg.Label())
 }
 
 // subrepo implements the subrepo() builtin that adds a new repository.
@@ -1010,6 +1021,7 @@ func subrepo(s *scope, args []pyObject) pyObject {
 	dep := string(args[DepArgIdx].(pyString))
 	var target *core.BuildTarget
 	root := name
+	fullName := filepath.Join(s.pkg.Name, name)
 	if dep != "" {
 		// N.B. The target must be already registered on this package.
 		target = s.pkg.TargetOrDie(core.ParseBuildLabelContext(dep, s.pkg).Name)
@@ -1024,13 +1036,13 @@ func subrepo(s *scope, args []pyObject) pyObject {
 	}
 	var state *core.BuildState
 	if args[ConfigArgIdx] != None {
-		state = s.state.ForSubrepo(name, path.Join(s.pkg.Name, string(args[ConfigArgIdx].(pyString))))
+		state = s.state.ForSubrepo(fullName, path.Join(s.pkg.Name, string(args[ConfigArgIdx].(pyString))))
 	} else if args[BazelCompatArgIdx].IsTruthy() {
-		state = s.state.ForSubrepo(name)
+		state = s.state.ForSubrepo(fullName)
 		state.Config.Bazel.Compatibility = true
 		state.Config.Parse.BuildFileName = append(state.Config.Parse.BuildFileName, "BUILD.bazel")
 	} else {
-		state = s.state.ForSubrepo(name)
+		state = s.state.ForSubrepo(fullName)
 	}
 
 	isCrossCompile := s.pkg.Subrepo != nil && s.pkg.Subrepo.IsCrossCompile

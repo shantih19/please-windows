@@ -68,6 +68,26 @@ func (p *Parser) MustLoadBuiltins(filename string, contents []byte) {
 	}
 }
 
+func (p *Parser) MustPreloadSubinclude(state *core.BuildState, target *core.BuildTarget) {
+	i := p.interpreter
+	s := i.scope.NewScope()
+
+	i.limiter.Acquire()
+	defer i.limiter.Release()
+
+	if target.Subrepo != nil {
+		loadPluginConfig(target.Subrepo.State, state, s.config)
+	}
+
+	for _, file := range target.FullOutputs() {
+		stmts, err := i.parser.parse(file)
+		if err := i.loadBuiltinStatements(s, stmts, err); err != nil {
+			log.Fatal(p.annotate(err, nil))
+		}
+	}
+
+}
+
 // ParseFile parses the contents of a single file in the BUILD language.
 // It returns true if the call was deferred at some point awaiting  target to build,
 // along with any error encountered.

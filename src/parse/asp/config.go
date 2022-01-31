@@ -102,6 +102,7 @@ func resolveSelf(values []string, subrepo string) []string {
 			if err != nil {
 				panic(err)
 			}
+			log.Warningf("subrepo: %v", subrepo)
 			// Force the full build label including empty subrepo so this is portable
 			v = fmt.Sprintf("///%v//%v:%v", l.Subrepo, l.PackageName, l.Name)
 		}
@@ -150,6 +151,7 @@ func pluginConfig(pluginState *core.BuildState, pkgState *core.BuildState) pyDic
 		if !ok {
 			// The default values are defined in the subrepo so should be parsed in that context
 			value = resolveSelf(definition.DefaultValue, pluginState.CurrentSubrepo)
+			log.Warningf("loading default value %v %v in %v", fullConfigKey, value, pluginState.CurrentSubrepo)
 		} else {
 			value = resolveSelf(value, pkgState.CurrentSubrepo)
 		}

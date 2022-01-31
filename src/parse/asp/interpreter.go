@@ -49,6 +49,9 @@ func newInterpreter(state *core.BuildState, p *Parser) *interpreter {
 // LoadBuiltins loads a set of builtins from a file, optionally with its contents.
 func (i *interpreter) LoadBuiltins(filename string, contents []byte, statements []*Statement) error {
 	s := i.scope.NewScope()
+
+	i.limiter.Acquire()
+	defer i.limiter.Release()
 	// Gentle hack - attach the native code once we have loaded the correct file.
 	// Needs to be after this file is loaded but before any of the others that will
 	// use functions from it.
