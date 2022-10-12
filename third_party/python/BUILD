@@ -289,6 +289,7 @@ pip_library(
     name = "setuptools",
     test_only = True,
     version = "47.1.1",
+    binary = True,
 )
 
 pip_library(
@@ -321,4 +322,17 @@ pip_library(
     name = "cx_oracle",
     package_name = "cx-Oracle",
     version = "8.2.1",
+)
+
+python_wheel(
+    name = "click",
+    version="8.1.3",
+
+)
+
+python_wheel(
+    name = "protoletariat",
+    version = "1.0.1",
+    binary=True,
+    deps = [":click"]
 )

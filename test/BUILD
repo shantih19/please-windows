@@ -10,6 +10,17 @@
 # mitigated by having these tests only run tests in this package which are tagged as manual
 # so the bootstrap script won't try to run them twice simultaneously.
 
+
+package(
+    default_visibility = ["PUBLIC"],
+    python_wheel_name_scheme = [
+        "{url_base}/{package_name}-{version}-${{OS}}_${{ARCH}}.whl",
+        "{url_base}/{package_name}-{version}.whl",
+        "https://files.pythonhosted.org/packages/py3/{initial}/{package_name}/{package_name}-{version}-py3-none-any.whl",
+        "https://files.pythonhosted.org/packages/py2.py3/{initial}/{package_name}/{package_name}-{version}-py2.py3-none-any.whl",
+    ],
+    python_wheel_repo = "https://get.please.build/third_party/python/py3",
+)
 subinclude("//test/build_defs")
 
 # This isn't really needed in this BUILD file, but is intended to avoid race conditions
@@ -499,4 +510,10 @@ build_rule(
 plz_e2e_test(
     name = "non_test_target_with_test_fields_set_test",
     cmd = "plz test //test:non_test_target_with_test_fields_set",
+)
+
+python_wheel(
+    name = "protoletariat",
+    version = "1.0.1",
+    binary=True,
 )
