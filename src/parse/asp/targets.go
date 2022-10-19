@@ -1,6 +1,7 @@
 package asp
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -12,20 +13,26 @@ import (
 // filegroupCommand is the command we put on filegroup rules.
 const filegroupCommand = pyString("filegroup")
 
+// textFileCommand is the command we put on text_file rules.
+const textFileCommand = pyString("text_file")
+
 const defaultFlakiness = 3
 
 const (
 	nameBuildRuleArgIdx = iota
 	cmdBuildRuleArgIdx
 	testCMDBuildRuleArgIdx
+	debugCMDBuildRuleArgIdx
 	srcsBuildRuleArgIdx
 	dataBuildRuleArgIdx
+	debugDataBuildRuleArgIdx
 	outsBuildRuleArgIdx
 	depsBuildRuleArgIdx
 	exportedDepsBuildRuleArgIdx
 	secretsBuildRuleArgIdx
 	toolsBuildRuleArgIdx
 	testToolsBuildRuleArgIdx
+	debugToolsBuildRuleArgIdx
 	labelsBuildRuleArgIdx
 	visibilityBuildRuleArgIdx
 	hashesBuildRuleArgIdx
@@ -35,7 +42,6 @@ const (
 	buildingDescriptionBuildRuleArgIdx
 	needsTransitiveDepsBuildRuleArgIdx
 	outputIsCompleteBuildRuleArgIdx
-	_
 	sandboxBuildRuleArgIdx
 	testSandboxBuildRuleArgIdx
 	noTestOutputBuildRuleArgIdx
@@ -59,15 +65,17 @@ const (
 	passEnvBuildRuleArgIdx
 	localBuildRuleArgIdx
 	outDirsBuildRuleArgIdx
-	configBuildRuleArgIdx
 	exitOnErrorArgIdx
 	entryPointsArgIdx
+	envArgIdx
+	fileContentArgIdx
+	subrepoArgIdx
 )
 
 // createTarget creates a new build target as part of build_rule().
 func createTarget(s *scope, args []pyObject) *core.BuildTarget {
 	isTruthy := func(i int) bool {
-		return args[i] != nil && args[i] != None && (args[i] == &True || args[i].IsTruthy())
+		return args[i] != nil && args[i] != None && args[i].IsTruthy()
 	}
 	name := string(args[nameBuildRuleArgIdx].(pyString))
 	testCmd := args[testCMDBuildRuleArgIdx]
@@ -90,16 +98,16 @@ func createTarget(s *scope, args []pyObject) *core.BuildTarget {
 	target := core.NewBuildTarget(label)
 	target.Subrepo = s.pkg.Subrepo
 	target.IsBinary = isTruthy(binaryBuildRuleArgIdx)
-	target.IsTest = test
+	target.IsSubrepo = isTruthy(subrepoArgIdx)
 	target.NeedsTransitiveDependencies = isTruthy(needsTransitiveDepsBuildRuleArgIdx)
 	target.OutputIsComplete = isTruthy(outputIsCompleteBuildRuleArgIdx)
 	target.Sandbox = isTruthy(sandboxBuildRuleArgIdx)
 	target.TestOnly = test || isTruthy(testOnlyBuildRuleArgIdx)
-	target.ShowProgress = isTruthy(progressBuildRuleArgIdx)
+	target.ShowProgress.Set(isTruthy(progressBuildRuleArgIdx))
 	target.IsRemoteFile = isTruthy(urlsBuildRuleArgIdx)
+	target.IsTextFile = args[cmdBuildRuleArgIdx] == textFileCommand
 	target.Local = isTruthy(localBuildRuleArgIdx)
 	target.ExitOnError = isTruthy(exitOnErrorArgIdx)
-	target.RuleMetadata = args[configBuildRuleArgIdx]
 	for _, o := range asStringList(s, args[outDirsBuildRuleArgIdx], "output_dirs") {
 		target.AddOutputDirectory(o)
 	}
@@ -111,7 +119,7 @@ func createTarget(s *scope, args []pyObject) *core.BuildTarget {
 		target.AddLabel(name)
 	}
 	if args[passEnvBuildRuleArgIdx] != None {
-		l := asStringList(s, args[passEnvBuildRuleArgIdx].(pyList), "pass_env")
+		l := asStringList(s, mustList(args[passEnvBuildRuleArgIdx]), "pass_env")
 		target.PassEnv = &l
 	}
 
@@ -124,33 +132,75 @@ func createTarget(s *scope, args []pyObject) *core.BuildTarget {
 	if target.IsBinary {
 		target.AddLabel("bin")
 	}
+	if target.IsRemoteFile {
+		target.AddLabel("remote")
+	}
 	target.Command, target.Commands = decodeCommands(s, args[cmdBuildRuleArgIdx])
 	if test {
+		target.Test = new(core.TestFields)
+
 		if flaky := args[flakyBuildRuleArgIdx]; flaky != nil {
 			if flaky == True {
-				target.Flakiness = defaultFlakiness
+				target.Test.Flakiness = defaultFlakiness
 				target.AddLabel("flaky") // Automatically label flaky tests
 			} else if flaky == False {
-				target.Flakiness = 1
+				target.Test.Flakiness = 1
 			} else if i, ok := flaky.(pyInt); ok {
 				if int(i) <= 1 {
-					target.Flakiness = 1
+					target.Test.Flakiness = 1
 				} else {
-					target.Flakiness = int(i)
+					target.Test.Flakiness = uint8(i)
 					target.AddLabel("flaky")
 				}
 			}
 		} else {
-			target.Flakiness = 1
+			target.Test.Flakiness = 1
 		}
 		if testCmd != nil && testCmd != None {
-			target.TestCommand, target.TestCommands = decodeCommands(s, args[testCMDBuildRuleArgIdx])
+			target.Test.Command, target.Test.Commands = decodeCommands(s, args[testCMDBuildRuleArgIdx])
 		}
-		target.TestTimeout = sizeAndTimeout(s, size, args[testTimeoutBuildRuleArgIdx], s.state.Config.Test.Timeout)
-		target.TestSandbox = isTruthy(testSandboxBuildRuleArgIdx)
-		target.NoTestOutput = isTruthy(noTestOutputBuildRuleArgIdx)
+		target.Test.Timeout = sizeAndTimeout(s, size, args[testTimeoutBuildRuleArgIdx], s.state.Config.Test.Timeout)
+		target.Test.Sandbox = isTruthy(testSandboxBuildRuleArgIdx)
+		target.Test.NoOutput = isTruthy(noTestOutputBuildRuleArgIdx)
+	}
+
+	if err := validateSandbox(s.state, target); err != nil {
+		log.Fatal(err)
+	}
+
+	if s.state.Config.Build.Config == "dbg" {
+		target.Debug = new(core.DebugFields)
+		target.Debug.Command, _ = decodeCommands(s, args[debugCMDBuildRuleArgIdx])
 	}
 	return target
+}
+
+// validateSandbox ensures that the target isn't opting out of the build/test sandbox when it's not allowed to
+func validateSandbox(state *core.BuildState, target *core.BuildTarget) error {
+	if target.IsFilegroup || len(state.Config.Sandbox.ExcludeableTargets) == 0 {
+		return nil
+	}
+	if !target.IsRemoteFile {
+		if target.Sandbox && (target.Test == nil || target.Test.Sandbox) {
+			return nil
+		}
+	}
+
+	if target.Label.PackageName == "_please" {
+		return nil
+	}
+	for _, whitelist := range state.Config.Sandbox.ExcludeableTargets {
+		if whitelist.Matches(target.Label) {
+			return nil
+		}
+	}
+	for _, dir := range state.Config.Parse.ExperimentalDir {
+		if strings.HasPrefix(target.Label.PackageName, dir) {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("%v is not whitelisted to opt out of the sandbox", target)
 }
 
 // sizeAndTimeout handles the size and build/test timeout arguments.
@@ -200,19 +250,18 @@ func decodeCommands(s *scope, obj pyObject) (string, map[string]string) {
 // populateTarget sets the assorted attributes on a build target.
 func populateTarget(s *scope, t *core.BuildTarget, args []pyObject) {
 	if t.IsRemoteFile {
-		for _, url := range args[urlsBuildRuleArgIdx].(pyList) {
+		for _, url := range mustList(args[urlsBuildRuleArgIdx]) {
 			t.AddSource(core.URLLabel(url.(pyString)))
 		}
-	} else {
-		addMaybeNamed(s, "srcs", args[srcsBuildRuleArgIdx], t.AddSource, t.AddNamedSource, false, false)
+	} else if t.IsTextFile {
+		t.FileContent = args[fileContentArgIdx].(pyString).String()
 	}
-	addMaybeNamed(s, "tools", args[toolsBuildRuleArgIdx], t.AddTool, t.AddNamedTool, true, true)
-	addMaybeNamed(s, "test_tools", args[testToolsBuildRuleArgIdx], t.AddTestTool, t.AddNamedTestTool, true, true)
+	addMaybeNamed(s, "srcs", args[srcsBuildRuleArgIdx], t.AddSource, t.AddNamedSource, false, false)
+	addMaybeNamedOrString(s, "tools", args[toolsBuildRuleArgIdx], t.AddTool, t.AddNamedTool, true, true)
 	addMaybeNamed(s, "system_srcs", args[systemSrcsBuildRuleArgIdx], t.AddSource, nil, true, false)
 	addMaybeNamed(s, "data", args[dataBuildRuleArgIdx], t.AddDatum, t.AddNamedDatum, false, false)
 	addMaybeNamedOutput(s, "outs", args[outsBuildRuleArgIdx], t.AddOutput, t.AddNamedOutput, t, false)
 	addMaybeNamedOutput(s, "optional_outs", args[optionalOutsBuildRuleArgIdx], t.AddOptionalOutput, nil, t, true)
-	addMaybeNamedOutput(s, "test_outputs", args[testOutputsBuildRuleArgIdx], t.AddTestOutput, nil, t, false)
 	addDependencies(s, "deps", args[depsBuildRuleArgIdx], t, false, false)
 	addDependencies(s, "exported_deps", args[exportedDepsBuildRuleArgIdx], t, true, false)
 	addDependencies(s, "internal_deps", args[internalDepsBuildRuleArgIdx], t, false, true)
@@ -220,10 +269,17 @@ func populateTarget(s *scope, t *core.BuildTarget, args []pyObject) {
 	addStrings(s, "hashes", args[hashesBuildRuleArgIdx], t.AddHash)
 	addStrings(s, "licences", args[licencesBuildRuleArgIdx], t.AddLicence)
 	addStrings(s, "requires", args[requiresBuildRuleArgIdx], t.AddRequire)
-	addStrings(s, "visibility", args[visibilityBuildRuleArgIdx], func(str string) {
-		t.Visibility = append(t.Visibility, parseVisibility(s, str))
-	})
+	if vis, ok := asList(args[visibilityBuildRuleArgIdx]); ok && len(vis) != 0 {
+		if v, ok := vis[0].(pyString); ok && v == "PUBLIC" {
+			t.Visibility = core.WholeGraph
+		} else {
+			addStrings(s, "visibility", args[visibilityBuildRuleArgIdx], func(str string) {
+				t.Visibility = append(t.Visibility, parseVisibility(s, str))
+			})
+		}
+	}
 	addEntryPoints(s, args[entryPointsArgIdx], t)
+	addEnv(s, args[envArgIdx], t)
 	addMaybeNamedSecret(s, "secrets", args[secretsBuildRuleArgIdx], t.AddSecret, t.AddNamedSecret, t, true)
 	addProvides(s, "provides", args[providesBuildRuleArgIdx], t)
 	if f := callbackFunction(s, "pre_build", args[preBuildBuildRuleArgIdx], 1, "argument"); f != nil {
@@ -231,6 +287,16 @@ func populateTarget(s *scope, t *core.BuildTarget, args []pyObject) {
 	}
 	if f := callbackFunction(s, "post_build", args[postBuildBuildRuleArgIdx], 2, "arguments"); f != nil {
 		t.PostBuildFunction = &postBuildFunction{f: f, s: s}
+	}
+
+	if t.IsTest() {
+		addMaybeNamedOrString(s, "test_tools", args[testToolsBuildRuleArgIdx], t.AddTestTool, t.AddNamedTestTool, true, true)
+		addMaybeNamedOutput(s, "test_outputs", args[testOutputsBuildRuleArgIdx], t.AddTestOutput, nil, t, false)
+	}
+
+	if t.Debug != nil {
+		addMaybeNamed(s, "debug_data", args[debugDataBuildRuleArgIdx], t.AddDebugDatum, t.AddDebugNamedDatum, false, false)
+		addMaybeNamedOrString(s, "debug_tools", args[debugToolsBuildRuleArgIdx], t.AddDebugTool, t.AddNamedDebugTool, true, true)
 	}
 }
 
@@ -250,6 +316,21 @@ func addEntryPoints(s *scope, arg pyObject, target *core.BuildTarget) {
 	target.EntryPoints = entryPoints
 }
 
+// addEnv adds entry points to a target
+func addEnv(s *scope, arg pyObject, target *core.BuildTarget) {
+	envPy, ok := asDict(arg)
+	s.Assert(ok, "env must be a dict")
+
+	env := make(map[string]string, len(envPy))
+	for name, val := range envPy {
+		v, ok := val.(pyString)
+		s.Assert(ok, "Values of env must be strings, found %v at key %v", val.Type(), name)
+		env[name] = string(v)
+	}
+
+	target.Env = env
+}
+
 // addMaybeNamed adds inputs to a target, possibly in named groups.
 func addMaybeNamed(s *scope, name string, obj pyObject, anon func(core.BuildInput), named func(string, core.BuildInput), systemAllowed, tool bool) {
 	if obj == nil {
@@ -265,18 +346,40 @@ func addMaybeNamed(s *scope, name string, obj pyObject, anon func(core.BuildInpu
 		s.Assert(named != nil, "%s cannot be given as a dict", name)
 		for k, v := range d {
 			if v != None {
-				l, ok := asList(v)
-				s.Assert(ok, "Values of %s must be lists of strings", name)
-				for _, li := range l {
-					if bi := parseBuildInput(s, li, name, systemAllowed, tool); bi != nil {
+				if l, ok := asList(v); ok {
+					for _, li := range l {
+						if bi := parseBuildInput(s, li, name, systemAllowed, tool); bi != nil {
+							named(k, bi)
+						}
+					}
+					continue
+				}
+				if str, ok := asString(v); ok {
+					if bi := parseBuildInput(s, str, name, systemAllowed, tool); bi != nil {
 						named(k, bi)
 					}
+					continue
 				}
+				s.Assert(ok, "Values of %s must be a string or lists of strings", name)
 			}
 		}
 	} else if obj != None {
 		s.Assert(false, "Argument %s must be a list or dict, not %s", name, obj.Type())
 	}
+}
+
+// addMaybeNamedOrString adds inputs to a target, possibly in named groups.
+func addMaybeNamedOrString(s *scope, name string, obj pyObject, anon func(core.BuildInput), named func(string, core.BuildInput), systemAllowed, tool bool) {
+	if obj == nil {
+		return
+	}
+	if str, ok := asString(obj); ok {
+		if bi := parseBuildInput(s, str, name, systemAllowed, tool); bi != nil {
+			anon(bi)
+		}
+		return
+	}
+	addMaybeNamed(s, name, obj, anon, named, systemAllowed, tool)
 }
 
 // addMaybeNamedOutput adds outputs to a target, possibly in a named group
@@ -291,7 +394,7 @@ func addMaybeNamedOutput(s *scope, name string, obj pyObject, anon func(string),
 				s.Assert(ok, "outs must be strings")
 				anon(string(out))
 				if !optional || !strings.HasPrefix(string(out), "*") {
-					s.pkg.MustRegisterOutput(string(out), t)
+					s.pkg.MustRegisterOutput(s.state, string(out), t)
 				}
 			}
 		}
@@ -306,7 +409,7 @@ func addMaybeNamedOutput(s *scope, name string, obj pyObject, anon func(string),
 					s.Assert(ok, "outs must be strings")
 					named(k, string(out))
 					if !optional || !strings.HasPrefix(string(out), "*") {
-						s.pkg.MustRegisterOutput(string(out), t)
+						s.pkg.MustRegisterOutput(s.state, string(out), t)
 					}
 				}
 			}
@@ -371,10 +474,14 @@ func addDependencies(s *scope, name string, obj pyObject, target *core.BuildTarg
 func addStrings(s *scope, name string, obj pyObject, f func(string)) {
 	if obj != nil && obj != None {
 		l, ok := asList(obj)
-		s.Assert(ok, "Argument %s must be a list, not %s", name, obj.Type())
+		if !ok {
+			s.Error("Argument %s must be a list, not %s", name, obj.Type())
+		}
 		for _, li := range l {
 			str, ok := li.(pyString)
-			s.Assert(ok || li == None, "%s must be strings", name)
+			if !ok && li != None {
+				s.Error("%s must be strings", name)
+			}
 			if str != "" && li != None {
 				f(string(str))
 			}
@@ -426,16 +533,16 @@ func parseBuildInput(s *scope, in pyObject, name string, systemAllowed, tool boo
 // Identifies if the file is owned by this package and returns an error if not.
 func parseSource(s *scope, src string, systemAllowed, tool bool) core.BuildInput {
 	if core.LooksLikeABuildLabel(src) {
+		pkg := s.pkg
 		if tool && s.pkg.Subrepo != nil && s.pkg.Subrepo.IsCrossCompile {
-			// Tools always use the host configuration.
-			// TODO(peterebden): this should really use something involving named output labels;
-			//                   right now we don't have a package handy to call that but we
-			//                   don't use them for tools anywhere either...
-			return checkLabel(s, core.ParseBuildLabel(src, s.pkg.Name))
+			// Tools should be parsed with the host OS and arch
+			pkg = &core.Package{
+				Name: pkg.Name,
+			}
 		}
-		label := core.MustParseNamedOutputLabel(src, s.pkg)
-		if l := label.Label(); l != nil {
-			checkLabel(s, *l)
+		label := core.MustParseNamedOutputLabel(src, pkg)
+		if l, ok := label.Label(); ok {
+			checkLabel(s, l)
 		}
 		return label
 	}
@@ -443,16 +550,12 @@ func parseSource(s *scope, src string, systemAllowed, tool bool) core.BuildInput
 	s.Assert(!strings.Contains(src, "../"), "%s is an invalid path; build target paths can't contain ../", src)
 	if src[0] == '/' || src[0] == '~' {
 		s.Assert(systemAllowed, "%s is an absolute path; that's not allowed", src)
-		return core.SystemFileLabel{Path: src}
+		return core.SystemFileLabel{Path: strings.TrimRight(src, "/")}
 	} else if tool {
 		// "go" as a source is interpreted as a file, as a tool it's interpreted as something on the PATH.
 		return core.SystemPathLabel{Name: src, Path: s.state.Config.Path()}
 	}
 	src = strings.TrimPrefix(src, "./")
-	// Make sure it's not the actual build file.
-	for _, filename := range s.state.Config.Parse.BuildFileName {
-		s.Assert(filename != src, "You can't specify the BUILD file as an input to a rule")
-	}
 	return core.NewFileLabel(src, s.pkg)
 }
 
@@ -481,7 +584,9 @@ type preBuildFunction struct {
 }
 
 func (f *preBuildFunction) Call(target *core.BuildTarget) error {
-	s := f.f.scope.NewPackagedScope(f.f.scope.state.Graph.PackageOrDie(target.Label))
+	s := f.f.scope.NewPackagedScope(f.f.scope.state.Graph.PackageOrDie(target.Label), 1)
+	s.config = f.s.config
+	s.Set("CONFIG", f.s.config)
 	s.Callback = true
 	s.Set(f.f.args[0], pyString(target.Label.Name))
 	_, err := s.interpreter.interpretStatements(s, f.f.code)
@@ -499,7 +604,9 @@ type postBuildFunction struct {
 }
 
 func (f *postBuildFunction) Call(target *core.BuildTarget, output string) error {
-	s := f.f.scope.NewPackagedScope(f.f.scope.state.Graph.PackageOrDie(target.Label))
+	s := f.f.scope.NewPackagedScope(f.f.scope.state.Graph.PackageOrDie(target.Label), 2)
+	s.config = f.s.config
+	s.Set("CONFIG", f.s.config)
 	s.Callback = true
 	s.Set(f.f.args[0], pyString(target.Label.Name))
 	s.Set(f.f.args[1], fromStringList(strings.Split(strings.TrimSpace(output), "\n")))
@@ -532,6 +639,14 @@ func asList(obj pyObject) (pyList, bool) {
 	return nil, false
 }
 
+// mustList is like asList but returns an empty list if the object isn't a list.
+func mustList(obj pyObject) pyList {
+	if l, ok := asList(obj); ok {
+		return l
+	}
+	return pyList{}
+}
+
 // asDict converts an object to a pyDict, accounting for frozen dicts.
 func asDict(obj pyObject) (pyDict, bool) {
 	if d, ok := obj.(pyDict); ok {
@@ -540,4 +655,12 @@ func asDict(obj pyObject) (pyDict, bool) {
 		return d.pyDict, true
 	}
 	return nil, false
+}
+
+// asString converts an object to a pyString
+func asString(obj pyObject) (pyString, bool) {
+	if s, ok := obj.(pyString); ok {
+		return s, true
+	}
+	return "", false
 }

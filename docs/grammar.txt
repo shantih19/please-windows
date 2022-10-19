@@ -3,9 +3,8 @@ file_input = { statement };
 
 # Any single statement. Must occur on its own line.
 statement = ( "pass" | "continue" | func_def | for | if | return |
-          raise | assert | ident_statement | literal ) EOL;
+             assert | ident_statement | expression ) EOL;
 return = "return" [ expression { "," expression } ];
-raise = "raise" expression;
 assert = "assert" expression [ "," expression ];
 for = "for" Ident { "," Ident } "in" expression ":" EOL { statement };
 if = "if" expression ":" EOL { statement }
@@ -38,5 +37,5 @@ comprehension = "for" Ident { "," Ident } "in" expression
 slice = "[" [ expression ] [ ":" expression ] "]";
 lambda = "lambda" [ lambda_arg { "," lambda_arg } ] ":" expression;
 lambda_arg = Ident [ "=" expression ];
-operator = ("+" | "-" | "%" | "<" | ">" | "and" | "or" | "is" | "is" "not" |
-            "in" | "not" "in" | "==" | "!=" | ">=" | "<=" | "|");
+operator = ("+" | "-" | "*" | "/" | "%" | "<" | ">" | "and" | "or" |
+            "is" | "is" "not" | "in" | "not" "in" | "==" | "!=" | ">=" | "<=" | "|");

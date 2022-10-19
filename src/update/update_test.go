@@ -2,7 +2,6 @@ package update
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,15 +30,19 @@ func (*fakeLogBackend) Log(level logging.Level, calldepth int, rec *logging.Reco
 }
 
 func TestVerifyNewPlease(t *testing.T) {
-	assert.True(t, verifyNewPlease("src/please", core.PleaseVersion.String()))
+	assert.True(t, verifyNewPlease("src/please", core.PleaseVersion))
 	assert.False(t, verifyNewPlease("src/please", "wibble"))
-	assert.False(t, verifyNewPlease("wibble", core.PleaseVersion.String()))
+	assert.False(t, verifyNewPlease("wibble", core.PleaseVersion))
 }
 
 func TestFindLatestVersion(t *testing.T) {
-	assert.Equal(t, "42.0.0", findLatestVersion(server.URL).String())
-	assert.Panics(t, func() { findLatestVersion(server.URL + "/blah") })
-	assert.Panics(t, func() { findLatestVersion("notaurl") })
+	assert.Equal(t, "42.0.0", findLatestVersion(server.URL, false).String())
+	assert.Panics(t, func() { findLatestVersion(server.URL+"/blah", false) })
+	assert.Panics(t, func() { findLatestVersion("notaurl", false) })
+}
+
+func TestFindLatestPrereleaseVersion(t *testing.T) {
+	assert.Equal(t, "43.0.0-beta.1", findLatestVersion(server.URL, true).String())
 }
 
 func TestFileMode(t *testing.T) {
@@ -52,10 +55,10 @@ func TestLinkNewFile(t *testing.T) {
 	c := makeConfig("linknewfile")
 	dir := path.Join(c.Please.Location, c.Please.Version.String())
 	assert.NoError(t, os.MkdirAll(dir, core.DirPermissions))
-	assert.NoError(t, ioutil.WriteFile(path.Join(dir, "please"), []byte("test"), 0775))
+	assert.NoError(t, os.WriteFile(path.Join(dir, "please"), []byte("test"), 0775))
 	linkNewFile(c, "please")
 	assert.True(t, core.PathExists(path.Join(c.Please.Location, "please")))
-	assert.NoError(t, ioutil.WriteFile(path.Join(c.Please.Location, "exists"), []byte("test"), 0775))
+	assert.NoError(t, os.WriteFile(path.Join(c.Please.Location, "exists"), []byte("test"), 0775))
 }
 
 func TestDownloadNewPlease(t *testing.T) {
@@ -78,58 +81,58 @@ func TestDownloadNewPlease(t *testing.T) {
 
 func TestShouldUpdateVersionsMatch(t *testing.T) {
 	c := makeConfig("shouldupdate")
-	c.Please.Version.Set(core.PleaseVersion.String())
+	c.Please.Version.Set(core.PleaseVersion)
 	// Versions match, update is never needed
-	assert.False(t, shouldUpdate(c, false, false))
-	assert.False(t, shouldUpdate(c, true, true))
+	assert.False(t, shouldUpdate(c, false, false, false))
+	assert.False(t, shouldUpdate(c, true, true, false))
 }
 
 func TestShouldUpdateVersionsDontMatch(t *testing.T) {
 	c := makeConfig("shouldupdate")
 	c.Please.Version.UnmarshalFlag("2.0.0")
 	// Versions don't match but update is skipped
-	assert.False(t, shouldUpdate(c, false, false))
+	assert.False(t, shouldUpdate(c, false, false, false))
 	// Versions don't match, update is not skipped.
-	assert.True(t, shouldUpdate(c, true, false))
+	assert.True(t, shouldUpdate(c, true, false, false))
 	// Updates are off in config.
 	c.Please.SelfUpdate = false
-	assert.False(t, shouldUpdate(c, true, false))
+	assert.False(t, shouldUpdate(c, true, false, false))
 }
 
 func TestShouldUpdateGTEVersion(t *testing.T) {
 	c := makeConfig("shouldupdate")
 	c.Please.Version.UnmarshalFlag(">=2.0.0")
-	assert.False(t, shouldUpdate(c, true, false))
-	assert.True(t, shouldUpdate(c, true, true))
+	assert.False(t, shouldUpdate(c, true, false, false))
+	assert.True(t, shouldUpdate(c, true, true, false))
 }
 
 func TestShouldUpdateNoDownloadLocation(t *testing.T) {
 	c := makeConfig("shouldupdate")
 	// Download location isn't set
 	c.Please.DownloadLocation = ""
-	assert.False(t, shouldUpdate(c, true, true))
+	assert.False(t, shouldUpdate(c, true, true, false))
 }
 
 func TestShouldUpdateNoPleaseLocation(t *testing.T) {
 	c := makeConfig("shouldupdate")
 	// Please location isn't set
 	c.Please.Location = ""
-	assert.False(t, shouldUpdate(c, true, true))
+	assert.False(t, shouldUpdate(c, true, true, false))
 }
 
 func TestShouldUpdateNoVersion(t *testing.T) {
 	c := makeConfig("shouldupdate")
 	// No version is set, shouldn't update unless we force
 	c.Please.Version = cli.Version{}
-	assert.False(t, shouldUpdate(c, true, false))
-	assert.Equal(t, core.PleaseVersion, c.Please.Version.Semver())
+	assert.False(t, shouldUpdate(c, true, false, false))
+	assert.Equal(t, pleaseVersion(), c.Please.Version.Semver())
 	c.Please.Version = cli.Version{}
-	assert.True(t, shouldUpdate(c, true, true))
+	assert.True(t, shouldUpdate(c, true, true, false))
 }
 
 func TestDownloadAndLinkPlease(t *testing.T) {
 	c := makeConfig("downloadandlink")
-	c.Please.Version.UnmarshalFlag(core.PleaseVersion.String())
+	c.Please.Version.UnmarshalFlag(core.PleaseVersion)
 	newPlease := downloadAndLinkPlease(c, false, true)
 	assert.True(t, core.PathExists(newPlease))
 }
@@ -147,21 +150,23 @@ func TestFilterArgs(t *testing.T) {
 	assert.Equal(t, []string{"plz", "update"}, filterArgs(true, []string{"plz", "update", "--force"}))
 }
 
-func TestXZVersions(t *testing.T) {
+func TestFullDistVersion(t *testing.T) {
 	var v cli.Version
 	v.UnmarshalFlag("13.1.9")
-	assert.False(t, shouldUseXZ(v))
-	v.UnmarshalFlag("13.2.0")
-	assert.True(t, shouldUseXZ(v))
+	assert.True(t, shouldDownloadFullDist(v))
+	v.UnmarshalFlag("16.2.0")
+	assert.False(t, shouldDownloadFullDist(v))
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	vCurrent := fmt.Sprintf("/%s_%s/%s/please_%s.tar.xz", runtime.GOOS, runtime.GOARCH, core.PleaseVersion, core.PleaseVersion)
-	v42 := fmt.Sprintf("/%s_%s/42.0.0/please_42.0.0.tar.xz", runtime.GOOS, runtime.GOARCH)
+	vCurrent := fmt.Sprintf("/%s_%s/%s/please_%s", runtime.GOOS, runtime.GOARCH, pleaseVersion(), pleaseVersion())
+	v42 := fmt.Sprintf("/%s_%s/42.0.0/please_42.0.0", runtime.GOOS, runtime.GOARCH)
 	if r.URL.Path == "/latest_version" {
 		w.Write([]byte("42.0.0"))
+	} else if r.URL.Path == "/latest_prerelease_version" {
+		w.Write([]byte("43.0.0-beta.1"))
 	} else if r.URL.Path == vCurrent || r.URL.Path == v42 {
-		b, err := ioutil.ReadFile("src/update/please_test.tar.xz")
+		b, err := os.ReadFile("src/update/please_test")
 		if err != nil {
 			panic(err)
 		}

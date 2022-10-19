@@ -1,4 +1,4 @@
-subinclude("//build_defs:plz_e2e_test")
+subinclude("//test/build_defs")
 
 plz_e2e_test(
     name = "subinclude_visibility_test",
@@ -10,4 +10,9 @@ plz_e2e_test(
 plz_e2e_test(
     name = "inline_subinclude_test",
     cmd = "plz query alltargets //test/parse/inline_subinclude:all",
+)
+
+plz_e2e_test(
+    name = "pre_post_build_config_test",
+    cmd = "plz build //test/parse/pre_post_build_config:target",
 )

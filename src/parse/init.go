@@ -3,11 +3,11 @@ package parse
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/thought-machine/please/rules"
 	"github.com/thought-machine/please/rules/bazel"
@@ -17,34 +17,36 @@ import (
 )
 
 // InitParser initialises the parser engine. This is guaranteed to be called exactly once before any calls to Parse().
-func InitParser(state *core.BuildState) {
+func InitParser(state *core.BuildState) *core.BuildState {
 	if state.Parser == nil {
-		state.Parser = &aspParser{asp: newAspParser(state)}
+		p := &aspParser{parser: newAspParser(state), init: make(chan struct{})}
+		state.Parser = p
+		go p.Init(state)
 	}
+	return state
 }
 
-// An aspParser implements the core.Parser interface around our asp package.
+// aspParser implements the core.Parser interface around our parser package.
 type aspParser struct {
-	asp *asp.Parser
+	parser *asp.Parser
+	init   chan struct{}
+	once   sync.Once
 }
 
 // newAspParser returns a asp.Parser object with all the builtins loaded
 func newAspParser(state *core.BuildState) *asp.Parser {
 	p := asp.NewParser(state)
 	log.Debug("Loading built-in build rules...")
-	dir, _ := rules.AssetDir("")
+	dir, _ := rules.AllAssets(state.ExcludedBuiltinRules())
 	sort.Strings(dir)
 	for _, filename := range dir {
-		if strings.HasSuffix(filename, ".gob") {
-			srcFile := strings.TrimSuffix(filename, ".gob")
-			src, _ := rules.Asset(srcFile)
-			p.MustLoadBuiltins("rules/"+srcFile, src, rules.MustAsset(filename))
-		}
+		src, _ := rules.ReadAsset(filename)
+		p.MustLoadBuiltins(filename, src)
 	}
 
 	for _, preload := range state.Config.Parse.PreloadBuildDefs {
 		log.Debug("Preloading build defs from %s...", preload)
-		p.MustLoadBuiltins(preload, nil, nil)
+		p.MustLoadBuiltins(preload, nil)
 	}
 
 	if state.Config.Bazel.Compatibility {
@@ -53,16 +55,59 @@ func newAspParser(state *core.BuildState) *asp.Parser {
 		createBazelSubrepo(state)
 	}
 
-	log.Debug("Parser initialised")
+	log.Debug("parser initialised")
 	return p
 }
 
-func (p *aspParser) ParseFile(state *core.BuildState, pkg *core.Package, filename string) error {
-	return p.asp.ParseFile(pkg, filename)
+// NewParser creates a new parser for the state
+func (p *aspParser) NewParser(state *core.BuildState) {
+	state.Parser = &aspParser{parser: newAspParser(state), init: make(chan struct{})}
 }
 
-func (p *aspParser) ParseReader(state *core.BuildState, pkg *core.Package, reader io.ReadSeeker) error {
-	_, err := p.asp.ParseReader(pkg, reader)
+func (p *aspParser) WaitForInit() {
+	<-p.init
+}
+
+func (p *aspParser) Init(state *core.BuildState) {
+	p.once.Do(func() {
+		includes := state.Config.Parse.PreloadSubincludes
+		if state.RepoConfig != nil {
+			includes = append(includes, state.RepoConfig.Parse.PreloadSubincludes...)
+		}
+		wg := sync.WaitGroup{}
+		for _, inc := range includes {
+			if inc.IsPseudoTarget() {
+				log.Fatalf("Can't preload pseudotarget %v", inc)
+			}
+			wg.Add(1)
+			// Queue them up asynchronously to feed the queues as quickly as possible
+			go func(inc core.BuildLabel) {
+				state.WaitForBuiltTarget(inc, core.OriginalTarget)
+				wg.Done()
+			}(inc)
+		}
+
+		// We must wait for all the subinclude targets to be built otherwise updating the locals might race with parsing
+		// a package
+		wg.Wait()
+
+		// Preload them in order to avoid non-deterministic errors when the subincludes depend on each other
+		for _, inc := range includes {
+			if err := p.parser.SubincludeTarget(state, state.WaitForTargetAndEnsureDownload(inc, core.OriginalTarget)); err != nil {
+				log.Fatalf("%v", err)
+			}
+		}
+		p.parser.Finalise()
+		close(p.init)
+	})
+}
+
+func (p *aspParser) ParseFile(pkg *core.Package, filename string) error {
+	return p.parser.ParseFile(pkg, filename)
+}
+
+func (p *aspParser) ParseReader(pkg *core.Package, reader io.ReadSeeker) error {
+	_, err := p.parser.ParseReader(pkg, reader)
 	return err
 }
 
@@ -79,23 +124,27 @@ func (p *aspParser) RunPostBuildFunction(threadID int, state *core.BuildState, t
 	})
 }
 
+// BuildRuleArgOrder returns a map of the arguments to build rule and the order they appear in the source file
+func (p *aspParser) BuildRuleArgOrder() map[string]int {
+	return p.parser.BuildRuleArgOrder()
+}
+
 // runBuildFunction runs either the pre- or post-build function.
 func (p *aspParser) runBuildFunction(tid int, state *core.BuildState, target *core.BuildTarget, callbackType string, f func() error) error {
-	state.LogBuildResult(tid, target.Label, core.PackageParsing, fmt.Sprintf("Running %s-build function for %s", callbackType, target.Label))
-	pkg := state.WaitForPackage(target.Label)
-	changed, err := pkg.EnterBuildCallback(f)
-	if err != nil {
+	state.LogBuildResult(tid, target, core.PackageParsing, fmt.Sprintf("Running %s-build function for %s", callbackType, target.Label))
+	state.SyncParsePackage(target.Label)
+	if err := f(); err != nil {
 		state.LogBuildError(tid, target.Label, core.ParseFailed, err, "Failed %s-build function for %s", callbackType, target.Label)
-	} else {
-		if err := rescanDeps(state, changed); err != nil {
-			return err
-		}
-		state.LogBuildResult(tid, target.Label, core.TargetBuilding, fmt.Sprintf("Finished %s-build function for %s", callbackType, target.Label))
+		return err
 	}
-	return err
+	state.LogBuildResult(tid, target, core.TargetBuilding, fmt.Sprintf("Finished %s-build function for %s", callbackType, target.Label))
+	return nil
 }
 
 func createBazelSubrepo(state *core.BuildState) {
+	if sr := state.Graph.Subrepo("bazel_tools"); sr != nil {
+		return
+	}
 	dir := path.Join(core.OutDir, "bazel_tools")
 	state.Graph.AddSubrepo(&core.Subrepo{
 		Name:  "bazel_tools",
@@ -109,9 +158,8 @@ func createBazelSubrepo(state *core.BuildState) {
 	if err := os.MkdirAll(dir, core.DirPermissions); err != nil {
 		log.Fatalf("%s", err)
 	}
-	filenames, _ := bazel.AssetDir("")
-	for _, filename := range filenames {
-		if err := ioutil.WriteFile(path.Join(dir, strings.Replace(filename, ".build_defs", ".bzl", -1)), bazel.MustAsset(filename), 0644); err != nil {
+	for filename, data := range bazel.AllFiles() {
+		if err := os.WriteFile(path.Join(dir, strings.ReplaceAll(filename, ".build_defs", ".bzl")), data, 0644); err != nil {
 			log.Fatalf("%s", err)
 		}
 	}

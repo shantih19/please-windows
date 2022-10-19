@@ -9,15 +9,10 @@ import (
 	"os"
 	"regexp"
 	"testing"
-	"time"
 
 	fpb "github.com/bazelbuild/remote-apis/build/bazel/remote/asset/v1"
 	pb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/bazelbuild/remote-apis/build/bazel/semver"
-	"github.com/golang/protobuf/proto"
-	"github.com/golang/protobuf/ptypes"
-	"github.com/golang/protobuf/ptypes/any"
-	"github.com/golang/protobuf/ptypes/timestamp"
 	"github.com/peterebden/go-sri"
 	bs "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/genproto/googleapis/longrunning"
@@ -25,6 +20,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/thought-machine/please/src/core"
 )
@@ -39,8 +37,8 @@ func newClientInstance(name string) *Client {
 	config.Build.HashFunction = "sha256"
 	config.Remote.NumExecutors = 1
 	config.Remote.Instance = name
-	config.Remote.HomeDir = "~/.please"
 	config.Remote.Secure = false
+	config.Remote.Platform = []string{"OSFamily=linux"}
 	state := core.NewBuildState(config)
 	state.Config.Remote.URL = "127.0.0.1:9987"
 	state.Config.Remote.AssetURL = state.Config.Remote.URL
@@ -60,7 +58,7 @@ type testServer struct {
 func (s *testServer) GetCapabilities(ctx context.Context, req *pb.GetCapabilitiesRequest) (*pb.ServerCapabilities, error) {
 	return &pb.ServerCapabilities{
 		CacheCapabilities: &pb.CacheCapabilities{
-			DigestFunction: s.DigestFunction,
+			DigestFunctions: s.DigestFunction,
 			ActionCacheUpdateCapabilities: &pb.ActionCacheUpdateCapabilities{
 				UpdateEnabled: true,
 			},
@@ -248,17 +246,10 @@ func (s *testServer) QueryWriteStatus(ctx context.Context, req *bs.QueryWriteSta
 	return nil, status.Errorf(codes.NotFound, "resource %s not found", req.ResourceName)
 }
 
-// toTimestamp converts a time.Time into a protobuf timestamp
-func toTimestamp(t time.Time) *timestamp.Timestamp {
-	return &timestamp.Timestamp{
-		Seconds: t.Unix(),
-		Nanos:   int32(t.Nanosecond()),
-	}
-}
-
 func (s *testServer) Execute(req *pb.ExecuteRequest, srv pb.Execution_ExecuteServer) error {
-	mm := func(msg proto.Message) *any.Any {
-		a, _ := ptypes.MarshalAny(msg)
+	mm := func(msg protoreflect.ProtoMessage) *anypb.Any {
+		a := &anypb.Any{}
+		a.MarshalFrom(msg)
 		return a
 	}
 	srv.Send(&longrunning.Operation{
@@ -267,21 +258,21 @@ func (s *testServer) Execute(req *pb.ExecuteRequest, srv pb.Execution_ExecuteSer
 			Stage: pb.ExecutionStage_CACHE_CHECK,
 		}),
 	})
-	queued := toTimestamp(time.Now())
+	queued := timestamppb.Now()
 	srv.Send(&longrunning.Operation{
 		Name: "geoff",
 		Metadata: mm(&pb.ExecuteOperationMetadata{
 			Stage: pb.ExecutionStage_QUEUED,
 		}),
 	})
-	start := toTimestamp(time.Now())
+	start := timestamppb.Now()
 	srv.Send(&longrunning.Operation{
 		Name: "geoff",
 		Metadata: mm(&pb.ExecuteOperationMetadata{
 			Stage: pb.ExecutionStage_EXECUTING,
 		}),
 	})
-	completed := toTimestamp(time.Now())
+	completed := timestamppb.Now()
 
 	// Keep stdout as a blob to force the client to download it.
 	s.blobs["5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"] = []byte("hello\n")
@@ -347,6 +338,7 @@ func (s *testServer) Execute(req *pb.ExecuteRequest, srv pb.Execution_ExecuteSer
 			},
 		})
 	} else {
+		s.blobs["aaaf60fab1ff6b3d8147bafa3d29cb3e985cf0265cbf53705372eaabcd76c06b"] = []byte("what is the meaning of life, the universe, and everything?\n")
 		srv.Send(&longrunning.Operation{
 			Name: "geoff",
 			Metadata: mm(&pb.ExecuteOperationMetadata{
@@ -359,8 +351,8 @@ func (s *testServer) Execute(req *pb.ExecuteRequest, srv pb.Execution_ExecuteSer
 						OutputFiles: []*pb.OutputFile{{
 							Path: "out2.txt",
 							Digest: &pb.Digest{
-								Hash:      "5fb3d47e893061ea6627334a8582c37398cfdc68fe7fa59c16912e4a3ab7a5d6",
-								SizeBytes: 19,
+								Hash:      "aaaf60fab1ff6b3d8147bafa3d29cb3e985cf0265cbf53705372eaabcd76c06b",
+								SizeBytes: 60,
 							},
 						}},
 						ExitCode: 0,

@@ -36,7 +36,7 @@ def config_setting(name:str, values:dict, visibility:list=None):
                      For example: {'cpu': 'amd64'} is successful if the CPU architecture is amd64.
       visibility (list): Visibility of the rule.
     """
-    on = any([_config_on(k, v) for k, v in sorted(values.items())])
+    on = all([_config_on(k, v) for k, v in sorted(values.items())])
     return build_rule(
         name = name,
         outs = [name],
@@ -63,7 +63,7 @@ def _config_on(name, value):
     elif name == 'os':
         return CONFIG.OS == value.lower()
     else:
-        raise ParseError('Unknown config_setting key %s' % name)
+        fail('Unknown config_setting key %s' % name)
 
 
 # We name CPUs as Go does, but support some additional aliases to match Bazel.

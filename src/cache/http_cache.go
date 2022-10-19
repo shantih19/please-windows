@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
@@ -16,8 +15,10 @@ import (
 
 	"github.com/hashicorp/go-retryablehttp"
 
+	"github.com/thought-machine/please/src/cli"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/fs"
+	"github.com/thought-machine/please/src/process"
 )
 
 type httpCache struct {
@@ -80,7 +81,7 @@ func (cache *httpCache) write(w io.WriteCloser, target *core.BuildTarget, files 
 
 	for _, out := range files {
 		if err := fs.Walk(path.Join(outDir, out), func(name string, isDir bool) error {
-			return cache.storeFile(tw, name)
+			return storeFile(tw, name)
 		}); err != nil {
 			log.Warning("Error uploading artifacts to HTTP cache: %s", err)
 			// TODO(peterebden): How can we cancel the request at this point?
@@ -88,7 +89,7 @@ func (cache *httpCache) write(w io.WriteCloser, target *core.BuildTarget, files 
 	}
 }
 
-func (cache *httpCache) storeFile(tw *tar.Writer, name string) error {
+func storeFile(tw *tar.Writer, name string) error {
 	info, err := os.Lstat(name)
 	if err != nil {
 		return err
@@ -125,18 +126,18 @@ func (cache *httpCache) storeFile(tw *tar.Writer, name string) error {
 	return err
 }
 
-func (cache *httpCache) Retrieve(target *core.BuildTarget, key []byte, files []string) bool {
+func (cache *httpCache) Retrieve(target *core.BuildTarget, key []byte, _ []string) bool {
 	cache.requestLimiter.acquire()
 	defer cache.requestLimiter.release()
 
-	m, err := cache.retrieve(target, key)
+	m, err := cache.retrieve(key)
 	if err != nil {
 		log.Warning("%s: Failed to retrieve files from HTTP cache: %s", target.Label, err)
 	}
 	return m
 }
 
-func (cache *httpCache) retrieve(target *core.BuildTarget, key []byte) (bool, error) {
+func (cache *httpCache) retrieve(key []byte) (bool, error) {
 	req, err := retryablehttp.NewRequest(http.MethodGet, cache.makeURL(key), nil)
 	if err != nil {
 		return false, err
@@ -149,7 +150,7 @@ func (cache *httpCache) retrieve(target *core.BuildTarget, key []byte) (bool, er
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil // doesn't exist - not an error
 	} else if resp.StatusCode != http.StatusOK {
-		b, _ := ioutil.ReadAll(resp.Body)
+		b, _ := io.ReadAll(resp.Body)
 		return false, fmt.Errorf("%s", string(b))
 	}
 	gzr, err := gzip.NewReader(resp.Body)
@@ -157,6 +158,10 @@ func (cache *httpCache) retrieve(target *core.BuildTarget, key []byte) (bool, er
 		return false, err
 	}
 	defer gzr.Close()
+	return readTar(gzr)
+}
+
+func readTar(gzr io.Reader) (bool, error) {
 	tr := tar.NewReader(gzr)
 	for {
 		hdr, err := tr.Next()
@@ -177,7 +182,7 @@ func (cache *httpCache) retrieve(target *core.BuildTarget, key []byte) (bool, er
 					return false, err
 				}
 			}
-			if f, err := os.OpenFile(hdr.Name, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, os.FileMode(hdr.Mode)); err != nil {
+			if f, err := openFile(hdr); err != nil {
 				return false, err
 			} else if _, err := io.Copy(f, tr); err != nil {
 				return false, err
@@ -194,7 +199,22 @@ func (cache *httpCache) retrieve(target *core.BuildTarget, key []byte) (bool, er
 	}
 }
 
-func (cache *httpCache) Clean(target *core.BuildTarget) {
+func openFile(header *tar.Header) (*os.File, error) {
+	f, err := os.OpenFile(header.Name, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, os.FileMode(header.Mode))
+	if err != nil {
+		if os.IsPermission(err) {
+			// The file might already exist and be ro. If so, remove it.
+			if err := fs.ForceRemove(process.New(), header.Name); err != nil {
+				log.Debug("failed to remove existing file when restoring from the cache: %w", err)
+			}
+			return os.OpenFile(header.Name, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, os.FileMode(header.Mode))
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
+func (cache *httpCache) Clean(*core.BuildTarget) {
 	// Not possible; this implementation can only clean for a hash.
 }
 
@@ -212,7 +232,7 @@ func newHTTPCache(config *core.Configuration) *httpCache {
 			HTTPClient: &http.Client{
 				Timeout: time.Duration(config.Cache.HTTPTimeout),
 			},
-			Logger:       &logWrapper{log},
+			Logger:       &cli.HTTPLogWrapper{Log: log},
 			RetryWaitMin: 1 * time.Second,
 			RetryWaitMax: 30 * time.Second,
 			RetryMax:     config.Cache.HTTPRetry,

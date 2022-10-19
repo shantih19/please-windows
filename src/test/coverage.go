@@ -6,18 +6,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/thought-machine/please/src/cli"
 	"github.com/thought-machine/please/src/core"
+	"github.com/thought-machine/please/src/fs"
 )
 
 // Parses test coverage for a single target from its output file.
 func parseTestCoverageFile(target *core.BuildTarget, outputFile string, run int) (*core.TestCoverage, error) {
-	data, err := ioutil.ReadFile(outputFile)
+	data, err := os.ReadFile(outputFile)
 	if err != nil && os.IsNotExist(err) {
 		return core.NewTestCoverage(), nil // Tests aren't required to produce coverage files.
 	} else if err != nil {
@@ -58,7 +58,7 @@ func AddOriginalTargetsToCoverage(state *core.BuildState, includeAllFiles bool) 
 func collectCoverageFiles(state *core.BuildState, includeAllFiles bool) map[string]bool {
 	doneTargets := map[*core.BuildTarget]bool{}
 	coverageFiles := map[string]bool{}
-	for _, label := range state.ExpandOriginalLabels() {
+	for _, label := range state.ExpandAllOriginalLabels() {
 		collectAllFiles(state, state.Graph.TargetOrDie(label), coverageFiles, includeAllFiles, true, doneTargets)
 	}
 	return coverageFiles
@@ -70,7 +70,7 @@ func collectAllFiles(state *core.BuildState, target *core.BuildTarget, coverageF
 		doneTargets[target] = true
 		for _, path := range target.AllSourcePaths(state.Graph) {
 			if hasCoverageExtension(state, path) {
-				coverageFiles[path] = !target.IsTest && !target.TestOnly // Skip test source files from actual coverage display
+				coverageFiles[path] = !target.IsTest() && !target.TestOnly // Skip test source files from actual coverage display
 			}
 		}
 		if deps {
@@ -118,7 +118,7 @@ func mergeCoverage(state *core.BuildState, recordedCoverage core.TestCoverage, c
 
 // countLines returns the number of lines in a file.
 func countLines(path string) int {
-	data, _ := ioutil.ReadFile(path)
+	data, _ := os.ReadFile(path)
 	return bytes.Count(data, []byte{'\n'})
 }
 
@@ -137,7 +137,7 @@ func WriteCoverageToFileOrDie(coverage core.TestCoverage, filename string, incre
 	out.Stats.CoverageByDirectory = getDirectoryCoverage(coverage)
 	if b, err := json.MarshalIndent(out, "", "    "); err != nil {
 		log.Fatalf("Failed to encode json: %s", err)
-	} else if err := ioutil.WriteFile(filename, b, 0644); err != nil {
+	} else if err := os.WriteFile(filename, b, 0644); err != nil {
 		log.Fatalf("Failed to write coverage results to %s: %s", filename, err)
 	}
 }
@@ -146,7 +146,7 @@ func WriteCoverageToFileOrDie(coverage core.TestCoverage, filename string, incre
 func WriteXMLCoverageToFileOrDie(sources []core.BuildLabel, coverage core.TestCoverage, filename string) {
 	data := coverageResultToXML(sources, coverage)
 
-	if err := ioutil.WriteFile(filename, data, 0644); err != nil {
+	if err := os.WriteFile(filename, data, 0644); err != nil {
 		log.Fatalf("Failed to write coverage results to %s: %s", filename, err)
 	}
 }
@@ -250,17 +250,29 @@ type IncrementalStats struct {
 }
 
 // RemoveFilesFromCoverage removes any files with extensions matching the given set from coverage.
-func RemoveFilesFromCoverage(coverage core.TestCoverage, extensions []string) {
+func RemoveFilesFromCoverage(coverage core.TestCoverage, extensions []string, globs []string) {
 	for _, files := range coverage.Tests {
 		removeFilesFromCoverage(files, extensions)
+		removeGlobsFromCoverage(files, globs)
 	}
 	removeFilesFromCoverage(coverage.Files, extensions)
+	removeGlobsFromCoverage(coverage.Files, globs)
 }
 
 func removeFilesFromCoverage(files map[string][]core.LineCoverage, extensions []string) {
 	for filename := range files {
 		for _, ext := range extensions {
 			if strings.HasSuffix(filename, ext) {
+				delete(files, filename)
+			}
+		}
+	}
+}
+
+func removeGlobsFromCoverage(files map[string][]core.LineCoverage, globs []string) {
+	for filename := range files {
+		for _, glob := range globs {
+			if ok, _ := fs.Match(glob, filename); ok {
 				delete(files, filename)
 			}
 		}

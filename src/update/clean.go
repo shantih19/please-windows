@@ -2,7 +2,6 @@ package update
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"sort"
@@ -11,13 +10,11 @@ import (
 
 	"github.com/thought-machine/please/src/cli"
 	"github.com/thought-machine/please/src/core"
-	"github.com/thought-machine/please/src/fs"
 )
 
 // clean checks for any stale versions in the download directory and wipes them out if OK.
 func clean(config *core.Configuration, manualUpdate bool) {
-	location := fs.ExpandHomePath(config.Please.Location)
-	dir, _ := ioutil.ReadDir(location)
+	dir, _ := os.ReadDir(config.Please.Location)
 	versions := make(semver.Versions, 0, len(dir))
 	// Convert these to semver
 	for _, entry := range dir {
@@ -43,7 +40,7 @@ func clean(config *core.Configuration, manualUpdate bool) {
 	sort.Sort(versions)
 	for _, version := range versions[:numToClean] {
 		log.Notice("Cleaning old version %s...", version)
-		if err := os.RemoveAll(path.Join(location, version.String())); err != nil {
+		if err := os.RemoveAll(path.Join(config.Please.Location, version.String())); err != nil {
 			log.Error("Couldn't remove %s: %s", version, err)
 		}
 	}

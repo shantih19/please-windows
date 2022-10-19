@@ -4,15 +4,21 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"fmt"
+	"hash"
+	"hash/crc32"
+	"hash/crc64"
 	"io"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/Workiva/go-datastructures/queue"
+	"github.com/cespare/xxhash/v2"
+	"lukechampine.com/blake3"
 
 	"github.com/thought-machine/please/src/cli"
+	"github.com/thought-machine/please/src/cmap"
 	"github.com/thought-machine/please/src/fs"
 	"github.com/thought-machine/please/src/process"
 )
@@ -20,35 +26,8 @@ import (
 // startTime is as close as we can conveniently get to process start time.
 var startTime = time.Now()
 
-// A taskType identifies the kind of task returned from NextTask()
-type taskType int
-
-// The values here are fiddled to make Compare work easily.
-// Essentially we prioritise on the higher bits only and use the lower ones to make
-// the values unique.
-// Subinclude tasks order first, but we're happy for all build / parse / test tasks
-// to be treated equivalently.
-const (
-	Kill            taskType = 0x0000 | 0 //nolint:staticcheck
-	SubincludeBuild          = 0x1000 | 1
-	SubincludeParse          = 0x2000 | 2
-	Build                    = 0x4000 | 3
-	Parse                    = 0x4000 | 4
-	Test                     = 0x4000 | 5
-	Stop                     = 0x8000 | 6
-	priorityMask             = ^0x00FF
-)
-
-type pendingTask struct {
-	Label     BuildLabel // Label of target to parse
-	Dependent BuildLabel // The target that depended on it (only for parse tasks)
-	Run       int        // The run number of this task (only for tests)
-	Type      taskType
-}
-
-func (t pendingTask) Compare(that queue.Item) int {
-	return int((t.Type & priorityMask) - (that.(pendingTask).Type & priorityMask))
-}
+// cycleCheckDuration is the length of time we allow inactivity for before we trigger cycle detection.
+const cycleCheckDuration = 5 * time.Second
 
 // ParseTask is the type for the parse task queue
 type ParseTask struct {
@@ -56,34 +35,51 @@ type ParseTask struct {
 	ForSubinclude    bool
 }
 
-// BuildTask is the type for the build task queue
-type BuildTask = BuildLabel
+// A TaskType identifies whether a task is a build or test action.
+type TaskType uint8
 
-// TestTask is the type for the test task queue
-type TestTask struct {
+const (
+	BuildTask TaskType = 0
+	TestTask  TaskType = 1
+)
+
+// A Task is the type for the queue of build/test tasks.
+type Task struct {
 	Label BuildLabel
-	Run   int
+	Type  TaskType
+	Run   uint32 // Only present for tests (the run of a build is always zero)
 }
 
-// ParseTaskQueue is a channel to send parse tasks down to parse worker pool
-type ParseTaskQueue = chan ParseTask
+// A OutputDownloadOption is the option for how outputs should be downloaded.
+type OutputDownloadOption uint8
 
-// BuildTaskQueue is a channel to send build tasks down to please worker pool
-type BuildTaskQueue = chan BuildTask
-
-// TestTaskQueue is a channel to send test tasks down to please worker pool
-type TestTaskQueue = chan TestTask
+const (
+	// Don't download outputs.
+	NoOutputDownload OutputDownloadOption = iota
+	// Download original target outputs only.
+	OriginalOutputDownload
+	// Download original target's transitive outputs too.
+	TransitiveOutputDownload
+)
 
 // A Parser is the interface to reading and interacting with BUILD files.
 type Parser interface {
+	// NewParser creates a new parser on the state object
+	NewParser(state *BuildState)
+	// WaitForInit waits until the parser is fully initialised with pre-loaded build definitions
+	WaitForInit()
+	// Init starts initialising the parser
+	Init(state *BuildState)
 	// ParseFile parses a single BUILD file into the given package.
-	ParseFile(state *BuildState, pkg *Package, filename string) error
+	ParseFile(pkg *Package, filename string) error
 	// ParseReader parses a single BUILD file into the given package.
-	ParseReader(state *BuildState, pkg *Package, reader io.ReadSeeker) error
+	ParseReader(pkg *Package, reader io.ReadSeeker) error
 	// RunPreBuildFunction runs a pre-build function for a target.
 	RunPreBuildFunction(threadID int, state *BuildState, target *BuildTarget) error
 	// RunPostBuildFunction runs a post-build function for a target.
 	RunPostBuildFunction(threadID int, state *BuildState, target *BuildTarget, output string) error
+	// BuildRuleArgOrder returns a map of the arguments to build rule and the order they appear in the source file
+	BuildRuleArgOrder() map[string]int
 }
 
 // A RemoteClient is the interface to a remote execution service.
@@ -100,6 +96,8 @@ type RemoteClient interface {
 	PrintHashes(target *BuildTarget, isTest bool)
 	// DataRate returns an estimate of the current in/out RPC data rates and totals so far in bytes per second.
 	DataRate() (int, int, int, int)
+	// Disconnect disconnects from the remote execution server.
+	Disconnect() error
 }
 
 // A TargetHasher is a thing that knows how to create hashes for targets.
@@ -117,16 +115,18 @@ type TargetHasher interface {
 // Tasks are internally tracked by priority, which is determined by their type.
 type BuildState struct {
 	Graph *BuildGraph
-	// Stream of pending tasks
-	pendingTasks *queue.PriorityQueue
-	// Stream of results from the build
-	results chan *BuildResult
+	// Streams of pending tasks
+	pendingParses                        chan ParseTask
+	pendingActions, pendingRemoteActions chan Task
 	// Timestamp that the build is considered to start at.
 	StartTime time.Time
 	// Various system statistics. Mostly used during remote communication.
-	Stats *SystemStats
+	stats *lockedStats
 	// Configuration options
 	Config *Configuration
+	// The .plzconfig file for this repo. Unlike Config, no default values are applied. This will represent the
+	// .plzconfig in a subrepo.
+	RepoConfig *Configuration
 	// Parser implementation. Other things can call this to perform various external parse tasks.
 	Parser Parser
 	// Subprocess executor.
@@ -152,16 +152,16 @@ type BuildState struct {
 	Include, Exclude []string
 	// Actual targets to exclude from discovery
 	ExcludeTargets []BuildLabel
-	// The original architecture that the user requested to build for.
-	OriginalArch cli.Arch
-	// True if we require rule hashes to be correctly verified (usually the case).
-	VerifyHashes bool
+	// The original architecture that the user requested to build for. Either the host arch, --arch, or the arch in the
+	// .plzconfig
+	TargetArch cli.Arch
+	// The architecture this state is for. This might change as we re-parse packages for different architectures e.g.
+	// for tools that run on the host vs. outputs that are compiled for the target arch above.
+	Arch cli.Arch
 	// Aggregated coverage for this run
 	Coverage TestCoverage
-	// True if >= 1 target has failed to build
-	BuildFailed bool
-	// True if >= 1 target has failed test cases
-	TestFailed bool
+	// True if we require rule hashes to be correctly verified (usually the case).
+	VerifyHashes bool
 	// True if tests should calculate coverage metrics
 	NeedCoverage bool
 	// True if we intend to build targets. False if we're just parsing
@@ -175,17 +175,13 @@ type BuildState struct {
 	NeedHashesOnly bool
 	// True if we only want to prepare build directories (ie. 'plz build --prepare')
 	PrepareOnly bool
-	// True if we're going to run a shell after builds are prepared.
-	PrepareShell bool
-	// True if we will download outputs during remote execution.
-	DownloadOutputs bool
+	// Whether and how to download outputs
+	OutputDownload OutputDownloadOption
 	// True if we only need to parse the initial package (i.e. don't search downwards
 	// through deps) - for example when doing `plz query print`.
 	ParsePackageOnly bool
 	// True if this build is triggered by watching for changes
 	Watch bool
-	// Number of times to run each test target. 1 == once each, plus flakes if necessary.
-	NumTestRuns int
 	// Whether to run multiple test runs sequentially or across multiple workers (can be useful if tests bind to ports
 	// or similar)
 	TestSequentially bool
@@ -199,14 +195,53 @@ type BuildState struct {
 	ShowTestOutput bool
 	// True to print all output of all tasks to stderr.
 	ShowAllOutput bool
+	// Port specified when debugging a target in server mode.
+	DebugPort int
 	// True to attach a debugger on test failure.
-	DebugTests bool
+	DebugFailingTests bool
 	// True if we think the underlying filesystem supports xattrs (which affects how we write some metadata).
 	XattrsSupported bool
+	// True if we have any remote executors configured.
+	anyRemote bool
+	// Number of times to run each test target. 1 == once each, plus flakes if necessary.
+	NumTestRuns uint16
 	// Experimental directories
 	experimentalLabels []BuildLabel
 	// Various items for tracking progress.
 	progress *stateProgress
+	// CurrentSubrepo is the subrepo this state is for or the empty string if this is the host repo's state
+	CurrentSubrepo string
+	// ParentState is the state of the repo containing this subrepo. Nil if this is the host repo.
+	ParentState *BuildState
+	// EnableBreakpoints enablese the breakpoint() build-in, and drops Please into an interactive debugger when
+	// they're encountered.
+	EnableBreakpoints bool
+}
+
+// ExcludedBuiltinRules returns a set of rules to exclude based on the feature flags
+func (state *BuildState) ExcludedBuiltinRules() map[string]struct{} {
+	// TODO(jpoole): remove this function, including the changes to rules.AllAssets() in v17
+	ret := make(map[string]struct{})
+	if state.Config.FeatureFlags.ExcludePythonRules {
+		ret["python_rules.build_defs"] = struct{}{}
+	}
+	if state.Config.FeatureFlags.ExcludeJavaRules {
+		ret["java_rules.build_defs"] = struct{}{}
+	}
+	if state.Config.FeatureFlags.ExcludeCCRules {
+		ret["c_rules.build_defs"] = struct{}{}
+		ret["cc_rules.build_defs"] = struct{}{}
+	}
+	if state.Config.FeatureFlags.ExcludeGoRules {
+		ret["go_rules.build_defs"] = struct{}{}
+	}
+	if state.Config.FeatureFlags.ExcludeShellRules {
+		ret["sh_rules.build_defs"] = struct{}{}
+	}
+	if state.Config.FeatureFlags.ExcludeProtoRules {
+		ret["proto_rules.build_defs"] = struct{}{}
+	}
+	return ret
 }
 
 // A stateProgress records various points of progress for a State.
@@ -215,22 +250,33 @@ type stateProgress struct {
 	// Used to count the number of currently active/pending targets
 	numActive  int64
 	numPending int64
-	numRunning int64
 	numDone    int64
 	mutex      sync.Mutex
-	// Used to track subinclude() calls that block until targets are built.
-	pendingTargets     map[BuildLabel]chan struct{}
-	pendingTargetMutex sync.Mutex
-	// Used to track general package parsing requests.
-	pendingPackages     map[packageKey]chan struct{}
-	pendingPackageMutex sync.Mutex
+	closeOnce  sync.Once
+	resultOnce sync.Once
+	// Used to track subinclude() calls that block until targets are built. Keyed by their label.
+	pendingTargets *cmap.Map[BuildLabel, chan struct{}]
+	// Used to track general package parsing requests. Keyed by a packageKey struct.
+	pendingPackages *cmap.Map[packageKey, chan struct{}]
+	// similar to pendingPackages but consumers haven't committed to parsing the package
+	packageWaits *cmap.Map[packageKey, chan struct{}]
 	// The set of known states
 	allStates []*BuildState
 	// Targets that we were originally requested to build
 	originalTargets     []BuildLabel
 	originalTargetMutex sync.Mutex
-	// True if the build has been successful so far (i.e. nothing has failed yet).
-	success bool
+	// True if something about the build has failed.
+	failed atomicBool
+	// True if >= 1 target has failed to build
+	buildFailed atomicBool
+	// True if >= 1 target has failed test cases
+	testFailed atomicBool
+	// Stream of results from the build
+	results chan *BuildResult
+	// Internal result stream, used to intermediate them for the cycle checker.
+	internalResults chan *BuildResult
+	// The cycle checker itself.
+	cycleDetector cycleDetector
 }
 
 // SystemStats stores information about the system.
@@ -253,113 +299,83 @@ type SystemStats struct {
 	NumWorkerProcesses int
 }
 
-// AddActiveTarget increments the counter for a newly active build target.
-func (state *BuildState) AddActiveTarget() {
-	atomic.AddInt64(&state.progress.numActive, 1)
+// lockedStats is just SystemStats with a mutex to protect it.
+type lockedStats struct {
+	sync.Mutex
+	Stats SystemStats
 }
 
-// AddPendingParse adds a task for a pending parse of a build label.
-func (state *BuildState) AddPendingParse(label, dependent BuildLabel, forSubinclude bool) {
+// addActiveTargets increments the counter for a number of newly active build targets.
+func (state *BuildState) addActiveTargets(n int) {
+	atomic.AddInt64(&state.progress.numActive, int64(n))
+}
+
+// addPendingParse adds a task for a pending parse of a build label.
+func (state *BuildState) addPendingParse(label, dependent BuildLabel, forSubinclude bool) {
 	atomic.AddInt64(&state.progress.numActive, 1)
 	atomic.AddInt64(&state.progress.numPending, 1)
-	if forSubinclude {
-		state.pendingTasks.Put(pendingTask{Label: label, Dependent: dependent, Type: SubincludeParse})
-	} else {
-		state.pendingTasks.Put(pendingTask{Label: label, Dependent: dependent, Type: Parse})
-	}
+	go func() {
+		defer func() {
+			recover() // Prevent death on 'send on closed channel'
+		}()
+		state.pendingParses <- ParseTask{Label: label, Dependent: dependent, ForSubinclude: forSubinclude}
+	}()
 }
 
-// AddPendingBuild adds a task for a pending build of a target.
-func (state *BuildState) AddPendingBuild(label BuildLabel, forSubinclude bool) {
-	if forSubinclude {
-		state.addPending(label, SubincludeBuild)
-	} else {
-		state.addPending(label, Build)
-	}
+// addPendingBuild adds a task for a pending build of a target.
+func (state *BuildState) addPendingBuild(target *BuildTarget) {
+	atomic.AddInt64(&state.progress.numPending, 1)
+	go func() {
+		defer func() {
+			recover() // Prevent death on 'send on closed channel'
+		}()
+		if state.anyRemote && !target.Local {
+			state.pendingRemoteActions <- Task{Label: target.Label, Type: BuildTask}
+		} else {
+			state.pendingActions <- Task{Label: target.Label, Type: BuildTask}
+		}
+	}()
 }
 
 // AddPendingTest adds a task for a pending test of a target.
-func (state *BuildState) AddPendingTest(label BuildLabel, run int) {
-	if state.NeedTests {
-		state.addPendingTask(pendingTask{
-			Label: label,
-			Type:  Test,
-			Run:   run,
-		})
+func (state *BuildState) AddPendingTest(target *BuildTarget) {
+	if state.TestSequentially {
+		state.addPendingTest(target, 1)
+	} else {
+		state.addPendingTest(target, int(state.NumTestRuns))
 	}
+}
+
+func (state *BuildState) addPendingTest(target *BuildTarget, numRuns int) {
+	atomic.AddInt64(&state.progress.numPending, int64(numRuns))
+	go func() {
+		defer func() {
+			recover() // Prevent death on 'send on closed channel'
+		}()
+		ch := state.pendingActions
+		if state.anyRemote && !target.Local {
+			ch = state.pendingRemoteActions
+		}
+		for run := 1; run <= numRuns; run++ {
+			ch <- Task{Label: target.Label, Run: uint32(run), Type: TestTask}
+		}
+	}()
 }
 
 // TaskQueues returns a set of channels to listen on for tasks of various types.
-// This should only be called once per state (otherwise you will not get a full set of tasks).
-func (state *BuildState) TaskQueues() (parses ParseTaskQueue, builds BuildTaskQueue, tests TestTaskQueue, remoteBuilds BuildTaskQueue, remoteTests TestTaskQueue) {
-	p := make(chan ParseTask, 100)
-	b := make(chan BuildTask, 100)
-	t := make(chan TestTask, 100)
-	rb := make(chan BuildLabel, 100)
-	rt := make(chan TestTask, 100)
-	go state.feedQueues(p, b, t, rb, rt)
-	return p, b, t, rb, rt
-}
-
-// feedQueues feeds the build queues created in TaskQueues.
-// We retain the internal priority queue since it is unbounded size which is pretty important
-// for us not to deadlock.
-func (state *BuildState) feedQueues(parses ParseTaskQueue, builds BuildTaskQueue, tests TestTaskQueue, remoteBuilds BuildTaskQueue, remoteTests TestTaskQueue) {
-	anyRemote := state.Config.NumRemoteExecutors() > 0
-	for {
-		t, _ := state.pendingTasks.Get(1)
-		task := t[0].(pendingTask)
-		remote := func() bool {
-			return anyRemote && !state.Graph.Target(task.Label).Local
-		}
-
-		switch task.Type {
-		case Stop, Kill:
-			close(parses)
-			close(builds)
-			close(tests)
-			close(remoteBuilds)
-			close(remoteTests)
-			return
-		case Parse, SubincludeParse:
-			parses <- ParseTask{Label: task.Label, Dependent: task.Dependent, ForSubinclude: task.Type == SubincludeParse}
-		case Build, SubincludeBuild:
-			atomic.AddInt64(&state.progress.numRunning, 1)
-			if remote() {
-				remoteBuilds <- task.Label
-			} else {
-				builds <- task.Label
-			}
-		case Test:
-			atomic.AddInt64(&state.progress.numRunning, 1)
-			testTask := TestTask{
-				Label: task.Label,
-				Run:   task.Run,
-			}
-			if remote() {
-				remoteTests <- testTask
-			} else {
-				tests <- testTask
-			}
-		}
-	}
-}
-
-func (state *BuildState) addPending(label BuildLabel, t taskType) {
-	state.addPendingTask(pendingTask{Label: label, Type: t})
-}
-
-func (state *BuildState) addPendingTask(task pendingTask) {
-	atomic.AddInt64(&state.progress.numPending, 1)
-	_ = state.pendingTasks.Put(task)
+func (state *BuildState) TaskQueues() (parses <-chan ParseTask, actions, remoteActions <-chan Task) {
+	return state.pendingParses, state.pendingActions, state.pendingRemoteActions
 }
 
 // TaskDone indicates that a single task is finished. Should be called after one is finished with
-// a task returned from NextTask(), or from a call to ExtraTask().
-func (state *BuildState) TaskDone(wasBuildOrTest bool) {
-	atomic.AddInt64(&state.progress.numDone, 1)
-	if wasBuildOrTest {
-		atomic.AddInt64(&state.progress.numRunning, -1)
+// a task returned from NextTask().
+func (state *BuildState) TaskDone() {
+	state.taskDone(false)
+}
+
+func (state *BuildState) taskDone(wasSynthetic bool) {
+	if !wasSynthetic {
+		atomic.AddInt64(&state.progress.numDone, 1)
 	}
 	if atomic.AddInt64(&state.progress.numPending, -1) <= 0 {
 		state.Stop()
@@ -368,19 +384,22 @@ func (state *BuildState) TaskDone(wasBuildOrTest bool) {
 
 // Stop stops the worker queues after any current tasks are done.
 func (state *BuildState) Stop() {
-	state.pendingTasks.Put(pendingTask{Type: Stop})
-}
-
-// KillAll kills all the workers & closes the result channels.
-func (state *BuildState) KillAll() {
-	state.pendingTasks.Put(pendingTask{Type: Kill})
-	state.CloseResults()
+	state.progress.closeOnce.Do(func() {
+		close(state.pendingParses)
+		close(state.pendingActions)
+		close(state.pendingRemoteActions)
+	})
 }
 
 // CloseResults closes the result channels.
 func (state *BuildState) CloseResults() {
-	if state.results != nil {
-		close(state.results)
+	state.progress.cycleDetector.Stop()
+	state.progress.mutex.Lock()
+	defer state.progress.mutex.Unlock()
+	if state.progress.results != nil {
+		state.progress.resultOnce.Do(func() {
+			close(state.progress.results)
+		})
 	}
 }
 
@@ -451,7 +470,7 @@ func (state *BuildState) AddOriginalTarget(label BuildLabel, addToList bool) {
 		state.progress.originalTargets = append(state.progress.originalTargets, label)
 		state.progress.originalTargetMutex.Unlock()
 	}
-	state.AddPendingParse(label, OriginalTarget, false)
+	state.addPendingParse(label, OriginalTarget, false)
 }
 
 // Hasher returns a PathHasher for the given function (e.g. "SHA1").
@@ -463,47 +482,70 @@ func (state *BuildState) Hasher(name string) *fs.PathHasher {
 	return hasher
 }
 
-// LogBuildResult logs the result of a target either building or parsing.
-func (state *BuildState) LogBuildResult(tid int, label BuildLabel, status BuildResultStatus, description string) {
-	if status == PackageParsed {
-		func() {
-			// We may have parse tasks waiting for this package to exist, check for them.
-			state.progress.pendingPackageMutex.Lock()
-			defer state.progress.pendingPackageMutex.Unlock()
+// OutputHashCheckers returns the subset of hash algos that are appropriate for checking the hashes argument on
+// build rules
+func (state *BuildState) OutputHashCheckers() []*fs.PathHasher {
+	hashCheckers := make([]*fs.PathHasher, 0, len(state.Config.Build.HashCheckers))
+	for _, algo := range state.Config.Build.HashCheckers {
+		hashCheckers = append(hashCheckers, state.Hasher(algo))
+	}
+	return hashCheckers
+}
 
-			if ch, present := state.progress.pendingPackages[packageKey{Name: label.PackageName, Subrepo: label.Subrepo}]; present {
-				close(ch) // This signals to anyone waiting that it's done.
-			}
-		}()
+// LogParseResult logs the result of a target parsing.
+func (state *BuildState) LogParseResult(tid int, label BuildLabel, status BuildResultStatus, description string) {
+	if status == PackageParsed {
+		// We may have parse tasks waiting for this package to exist, check for them.
+		key := packageKey{Name: label.PackageName, Subrepo: label.Subrepo}
+		if ch := state.progress.pendingPackages.Get(key); ch != nil {
+			close(ch) // This signals to anyone waiting that it's done.
+		}
+		if ch := state.progress.packageWaits.Get(key); ch != nil {
+			close(ch) // This signals to anyone waiting that it's done.
+		}
 		return // We don't notify anything else on these.
 	}
-	state.LogResult(&BuildResult{
+	state.logResult(&BuildResult{
 		ThreadID:    tid,
-		Time:        time.Now(),
 		Label:       label,
 		Status:      status,
 		Err:         nil,
 		Description: description,
 	})
-	if status == TargetBuilt || status == TargetCached {
-		func() {
-			// We may have parse tasks waiting for this guy to build, check for them.
-			state.progress.pendingTargetMutex.Lock()
-			defer state.progress.pendingTargetMutex.Unlock()
+}
 
-			if ch, present := state.progress.pendingTargets[label]; present {
-				close(ch) // This signals to anyone waiting that it's done.
-			}
-		}()
+// LogBuildResult logs the result of a target building.
+func (state *BuildState) LogBuildResult(tid int, target *BuildTarget, status BuildResultStatus, description string) {
+	state.logResult(&BuildResult{
+		ThreadID:    tid,
+		Label:       target.Label,
+		target:      target,
+		Status:      status,
+		Err:         nil,
+		Description: description,
+	})
+	if status == TargetBuilt || status == TargetCached {
+		// We may have parse tasks waiting for this guy to build, check for them.
+		if ch := state.progress.pendingTargets.Get(target.Label); ch != nil {
+			close(ch) // This signals to anyone waiting that it's done.
+		}
+	}
+}
+
+// ArchSubrepoInitialised closes the pending target channel for the non-existent arch subrepo psudo-target
+func (state *BuildState) ArchSubrepoInitialised(subrepoLabel BuildLabel) {
+	// We may have parse tasks waiting for this guy to build, check for them.
+	if ch := state.progress.pendingTargets.Get(subrepoLabel); ch != nil {
+		close(ch) // This signals to anyone waiting that it's done.
 	}
 }
 
 // LogTestResult logs the result of a target once its tests have completed.
-func (state *BuildState) LogTestResult(tid int, label BuildLabel, status BuildResultStatus, results *TestSuite, coverage *TestCoverage, err error, format string, args ...interface{}) {
-	state.LogResult(&BuildResult{
+func (state *BuildState) LogTestResult(tid int, target *BuildTarget, status BuildResultStatus, results *TestSuite, coverage *TestCoverage, err error, format string, args ...interface{}) {
+	state.logResult(&BuildResult{
 		ThreadID:    tid,
-		Time:        time.Now(),
-		Label:       label,
+		Label:       target.Label,
+		target:      target,
 		Status:      status,
 		Err:         err,
 		Description: fmt.Sprintf(format, args...),
@@ -516,9 +558,8 @@ func (state *BuildState) LogTestResult(tid int, label BuildLabel, status BuildRe
 
 // LogBuildError logs a failure for a target to parse, build or test.
 func (state *BuildState) LogBuildError(tid int, label BuildLabel, status BuildResultStatus, err error, format string, args ...interface{}) {
-	state.LogResult(&BuildResult{
+	state.logResult(&BuildResult{
 		ThreadID:    tid,
-		Time:        time.Now(),
 		Label:       label,
 		Status:      status,
 		Err:         err,
@@ -526,40 +567,89 @@ func (state *BuildState) LogBuildError(tid int, label BuildLabel, status BuildRe
 	})
 }
 
-// LogResult logs a build result directly to the state's queue.
-func (state *BuildState) LogResult(result *BuildResult) {
-	defer func() {
-		if r := recover(); r != nil {
-			// This is basically always "send on closed channel" which can happen because this
-			// channel gets closed while there might still be some other workers doing stuff.
-			// At that point we don't care much because the build has already failed.
-			log.Info("%s", r)
-		}
-	}()
-	if state.results != nil {
-		state.results <- result
-	}
+// logResult logs a build result directly to the state's queue.
+func (state *BuildState) logResult(result *BuildResult) {
+	result.Time = time.Now()
+	state.progress.internalResults <- result
 	if result.Status.IsFailure() {
-		state.progress.success = false
+		state.progress.failed.SetTrue()
 		if result.Status == TargetBuildFailed {
-			state.BuildFailed = true
+			state.progress.buildFailed.SetTrue()
 		} else if result.Status == TargetTestFailed {
-			state.TestFailed = true
+			state.progress.testFailed.SetTrue()
 		}
 	}
 }
 
-// Successful returns true if the state has been successful, i.e. no targets have errored.
-func (state *BuildState) Successful() bool {
-	return state.progress.success
+// forwardResults runs indefinitely, forwarding results from the internal
+// channel to the external one. On the way it checks if we need to do
+// cycle detection.
+func (state *BuildState) forwardResults() {
+	defer func() {
+		if r := recover(); r != nil {
+			// Ensure we don't get a "send on closed channel" when the
+			// outward results channel is closed.
+			log.Debug("%s", r)
+		}
+	}()
+	activeTargets := map[*BuildTarget]struct{}{}
+	// Persist this one timer throughout so we don't generate bazillions of them.
+	t := time.NewTimer(cycleCheckDuration)
+	t.Stop()
+	var result *BuildResult
+	for {
+		if len(activeTargets) == 0 {
+			t.Reset(cycleCheckDuration)
+			select {
+			case result = <-state.progress.internalResults:
+				// This has to be properly managed to prevent hangs.
+				if !t.Stop() {
+					<-t.C
+				}
+			case <-t.C:
+				go state.checkForCycles()
+				// Still need to get a result!
+				result = <-state.progress.internalResults
+			}
+		} else {
+			result = <-state.progress.internalResults
+		}
+		if target := result.target; target != nil {
+			if result.Status.IsActive() {
+				activeTargets[target] = struct{}{}
+			} else {
+				delete(activeTargets, target)
+			}
+		}
+		state.progress.mutex.Lock()
+		if state.progress.results != nil {
+			state.progress.results <- result
+		}
+		state.progress.mutex.Unlock()
+	}
+}
+
+// checkForCycles is run to detect a cycle in the graph. It converts any returned error into an async error.
+func (state *BuildState) checkForCycles() {
+	if err := state.progress.cycleDetector.Check(); err != nil {
+		state.LogBuildError(0, err.Cycle[0].Label, TargetBuildFailed, err, "")
+		state.Stop()
+	}
+}
+
+// Failures returns anything that has failed about the current build.
+func (state *BuildState) Failures() (anything, build, test bool) {
+	return state.progress.failed.Value(), state.progress.buildFailed.Value(), state.progress.testFailed.Value()
 }
 
 // Results returns a channel on which the caller can listen for results.
 func (state *BuildState) Results() <-chan *BuildResult {
-	if state.results == nil {
-		state.results = make(chan *BuildResult, 1000)
+	state.progress.mutex.Lock()
+	defer state.progress.mutex.Unlock()
+	if state.progress.results == nil {
+		state.progress.results = make(chan *BuildResult, 1000)
 	}
-	return state.results
+	return state.progress.results
 }
 
 // NumActive returns the number of currently active tasks (i.e. those that are
@@ -573,15 +663,8 @@ func (state *BuildState) NumDone() int {
 	return int(atomic.LoadInt64(&state.progress.numDone))
 }
 
-// SetTaskNumbers allows a caller to set the number of active and done tasks.
-// This may drastically confuse matters if used incorrectly.
-func (state *BuildState) SetTaskNumbers(active, done int64) {
-	atomic.StoreInt64(&state.progress.numActive, active)
-	atomic.StoreInt64(&state.progress.numDone, done)
-}
-
 // ExpandOriginalLabels expands any pseudo-labels (ie. :all, ... has already been resolved to a bunch :all targets)
-// from the set of original labels.
+// from the set of original labels. This will exclude non-test targets when we're building for test.
 func (state *BuildState) ExpandOriginalLabels() BuildLabels {
 	state.progress.originalTargetMutex.Lock()
 	targets := state.progress.originalTargets[:]
@@ -589,12 +672,67 @@ func (state *BuildState) ExpandOriginalLabels() BuildLabels {
 	return state.ExpandLabels(targets)
 }
 
+// ExpandAllOriginalLabels is the same as ExpandOriginalLabels except it always includes non-test targets
+func (state *BuildState) ExpandAllOriginalLabels() BuildLabels {
+	state.progress.originalTargetMutex.Lock()
+	targets := state.progress.originalTargets[:]
+	state.progress.originalTargetMutex.Unlock()
+	return state.expandLabels(targets, false)
+}
+
+func AnnotateLabels(labels []BuildLabel) []AnnotatedOutputLabel {
+	ret := make([]AnnotatedOutputLabel, len(labels))
+	for i, l := range labels {
+		ret[i] = AnnotatedOutputLabel{BuildLabel: l}
+	}
+	return ret
+}
+
+func readingStdinAnnotated(labels []AnnotatedOutputLabel) bool {
+	for _, l := range labels {
+		if l.BuildLabel == BuildLabelStdin {
+			return true
+		}
+	}
+	return false
+}
+
+// ExpandOriginalMaybeAnnotatedLabels works the same as ExpandOriginalLabels, however requires that the possitional args
+// be passed to it.
+func (state *BuildState) ExpandOriginalMaybeAnnotatedLabels(args []AnnotatedOutputLabel) []AnnotatedOutputLabel {
+	if readingStdinAnnotated(args) {
+		args = AnnotateLabels(state.ExpandOriginalLabels())
+	}
+	return state.ExpandMaybeAnnotatedLabels(args)
+}
+
+// ExpandMaybeAnnotatedLabels is the same as ExpandOriginalLabels except for annotated labels
+func (state *BuildState) ExpandMaybeAnnotatedLabels(labels []AnnotatedOutputLabel) []AnnotatedOutputLabel {
+	ret := make([]AnnotatedOutputLabel, 0, len(labels))
+	for _, l := range labels {
+		if l.Annotation != "" {
+			ret = append(ret, l)
+		} else {
+			for _, l := range state.ExpandLabels([]BuildLabel{l.BuildLabel}) {
+				ret = append(ret, AnnotatedOutputLabel{BuildLabel: l})
+			}
+		}
+	}
+
+	return ret
+}
+
 // ExpandLabels expands any pseudo-labels (ie. :all, ... has already been resolved to a bunch :all targets) from a set of labels.
 func (state *BuildState) ExpandLabels(labels []BuildLabel) BuildLabels {
+	return state.expandLabels(labels, state.NeedTests)
+}
+
+// ExpandLabels expands any pseudo-labels (ie. :all, ... has already been resolved to a bunch :all targets) from a set of labels.
+func (state *BuildState) expandLabels(labels []BuildLabel, justTests bool) BuildLabels {
 	ret := BuildLabels{}
 	for _, label := range labels {
-		if label.IsAllTargets() || label.IsAllSubpackages() {
-			ret = append(ret, state.expandOriginalPseudoTarget(label)...)
+		if label.IsPseudoTarget() {
+			ret = append(ret, state.expandOriginalPseudoTarget(label, justTests)...)
 		} else {
 			ret = append(ret, label)
 		}
@@ -603,11 +741,11 @@ func (state *BuildState) ExpandLabels(labels []BuildLabel) BuildLabels {
 }
 
 // expandOriginalPseudoTarget expands one original pseudo-target (i.e. :all or /...) and sorts it
-func (state *BuildState) expandOriginalPseudoTarget(label BuildLabel) BuildLabels {
+func (state *BuildState) expandOriginalPseudoTarget(label BuildLabel, justTests bool) BuildLabels {
 	ret := BuildLabels{}
 	addPackage := func(pkg *Package) {
 		for _, target := range pkg.AllTargets() {
-			if state.ShouldInclude(target) && (!state.NeedTests || target.IsTest) {
+			if state.ShouldInclude(target) && (!justTests || target.IsTest()) {
 				ret = append(ret, target.Label)
 			}
 		}
@@ -639,59 +777,71 @@ func (state *BuildState) ExpandVisibleOriginalTargets() BuildLabels {
 	return ret
 }
 
-// WaitForPackage either returns the given package which is already parsed and available,
-// or returns nil if nothing's parsed it already, in which case everything else calling this
-// will wait for the caller to parse it themselves.
-func (state *BuildState) WaitForPackage(label BuildLabel) *Package {
+// SyncParsePackage either returns the given package which is already parsed and available,
+// or returns nil indicating it is ready to be parsed. Everything subsequently calling this
+// will block until the original caller parse it.
+func (state *BuildState) SyncParsePackage(label BuildLabel) *Package {
 	if p := state.Graph.PackageByLabel(label); p != nil {
 		return p
 	}
-	key := packageKey{Name: label.PackageName, Subrepo: label.Subrepo}
-	state.progress.pendingPackageMutex.Lock()
-	if ch, present := state.progress.pendingPackages[key]; present {
-		state.progress.pendingPackageMutex.Unlock()
+	if ch, inserted := state.progress.pendingPackages.AddOrGet(label.packageKey(), make(chan struct{})); !inserted {
 		<-ch
-		return state.Graph.PackageByLabel(label)
 	}
-	// Nothing's registered this so we do it ourselves.
-	state.progress.pendingPackages[key] = make(chan struct{})
-	state.progress.pendingPackageMutex.Unlock()
 	return state.Graph.PackageByLabel(label) // Important to check again; it's possible to race against this whole lot.
+}
+
+// WaitForPackage is similar to WaitForBuiltTarget however
+func (state *BuildState) WaitForPackage(l, dependent BuildLabel) *Package {
+	if p := state.Graph.PackageByLabel(l); p != nil {
+		return p
+	}
+	key := packageKey{Name: l.PackageName, Subrepo: l.Subrepo}
+
+	// If something has promised to parse it, wait for them to do so
+	if ch := state.progress.pendingPackages.Get(key); ch != nil {
+		<-ch
+		return state.Graph.PackageByLabel(l)
+	}
+
+	// If something has already queued the package to be parsed, wait for them
+	if ch := state.progress.packageWaits.Get(key); ch != nil {
+		<-ch
+		return state.Graph.PackageByLabel(l)
+	}
+
+	// Otherwise queue the target for parse and recurse
+	state.addPendingParse(l, dependent, true)
+	state.progress.packageWaits.Set(key, make(chan struct{}))
+
+	return state.WaitForPackage(l, dependent)
 }
 
 // WaitForBuiltTarget blocks until the given label is available as a build target and has been successfully built.
 func (state *BuildState) WaitForBuiltTarget(l, dependent BuildLabel) *BuildTarget {
+	return state.waitForBuiltTarget(l, dependent, true)
+}
+
+func (state *BuildState) waitForBuiltTarget(l, dependent BuildLabel, forSubinclude bool) *BuildTarget {
 	if t := state.Graph.Target(l); t != nil {
 		if s := t.State(); s >= Built && s != Failed {
-			// Ensure we have downloaded its outputs if needed.
-			// This is a bit fiddly but works around the case where we already built it but
-			// didn't download, and now have found we need to.
-			state.ensureDownloaded(t)
 			return t
 		}
 	}
 	dependent.Name = "all" // Every target in this package depends on this one.
 	// okay, we need to register and wait for this guy.
-	state.progress.pendingTargetMutex.Lock()
-	if ch, present := state.progress.pendingTargets[l]; present {
+	if ch, inserted := state.progress.pendingTargets.AddOrGet(l, make(chan struct{})); !inserted {
 		// Something's already registered for this, get on the train
-		state.progress.pendingTargetMutex.Unlock()
 		<-ch
-		t := state.Graph.Target(l)
-		state.ensureDownloaded(t)
-		return t
+		return state.Graph.Target(l)
 	}
-	// Nothing's registered this, set it up.
-	state.progress.pendingTargets[l] = make(chan struct{})
-	state.progress.pendingTargetMutex.Unlock()
-	if err := state.QueueTarget(l, dependent, false, true); err != nil {
+	if err := state.queueTarget(l, dependent, forSubinclude, forSubinclude); err != nil {
 		log.Fatalf("%v", err)
 	}
 
 	// Do this all over; the re-checking that happens here is actually fairly important to resolve
 	// a potential race condition if the target was built between us checking earlier and registering
 	// the channel just now.
-	return state.WaitForBuiltTarget(l, dependent)
+	return state.waitForBuiltTarget(l, dependent, forSubinclude)
 }
 
 // AddTarget adds a new target to the build graph.
@@ -703,16 +853,18 @@ func (state *BuildState) AddTarget(pkg *Package, target *BuildTarget) {
 		// It's difficult to handle non-file sources because we don't know if they're
 		// parsed yet - recall filegroups are a special case for this since they don't
 		// explicitly declare their outputs but can re-output other rules' outputs.
-		for _, src := range target.AllLocalSources() {
-			pkg.MustRegisterOutput(src, target)
+		for _, src := range target.AllLocalSourceLocalPaths() {
+			pkg.MustRegisterOutput(state, src, target)
 		}
 	} else {
 		for _, out := range target.DeclaredOutputs() {
-			pkg.MustRegisterOutput(out, target)
+			pkg.MustRegisterOutput(state, out, target)
 		}
-		for _, out := range target.TestOutputs {
-			if !fs.IsGlob(out) {
-				pkg.MustRegisterOutput(out, target)
+		if target.IsTest() {
+			for _, out := range target.Test.Outputs {
+				if !fs.IsGlob(out) {
+					pkg.MustRegisterOutput(state, out, target)
+				}
 			}
 		}
 	}
@@ -721,8 +873,10 @@ func (state *BuildState) AddTarget(pkg *Package, target *BuildTarget) {
 // ShouldDownload returns true if the given target should be downloaded during remote execution.
 func (state *BuildState) ShouldDownload(target *BuildTarget) bool {
 	// Need to download the target if it was originally requested (and the user didn't pass --nodownload).
-	// Also anything needed for subinclude needs to be local.
-	return (state.IsOriginalTarget(target) && state.DownloadOutputs && !state.NeedTests) || target.NeededForSubinclude
+	downloadOriginalTarget := state.OutputDownload == OriginalOutputDownload && state.IsOriginalTarget(target)
+	downloadTransitiveTarget := state.OutputDownload == TransitiveOutputDownload
+	downloadLinkableTarget := state.Config.Build.DownloadLinkable && target.HasLinks(state)
+	return target.neededForSubinclude.Value() || (downloadOriginalTarget && !state.NeedTests) || downloadTransitiveTarget || downloadLinkableTarget
 }
 
 // ShouldRebuild returns true if we should force a rebuild of this target (i.e. the user
@@ -736,24 +890,47 @@ func (state *BuildState) WillRunRemotely(target *BuildTarget) bool {
 	return state.RemoteClient != nil && state.Config.NumRemoteExecutors() > 0 && !target.Local
 }
 
-// ensureDownloaded ensures that a target has been downloaded when built remotely.
+// EnsureDownloaded ensures that a target has been downloaded when built remotely.
 // If remote execution is not enabled it has no effect.
-func (state *BuildState) ensureDownloaded(target *BuildTarget) {
+func (state *BuildState) EnsureDownloaded(target *BuildTarget) error {
 	if state.RemoteClient != nil {
 		if err := state.RemoteClient.Download(target); err != nil {
-			// Panicking is a bit crap but the places we are called from do not return an error.
-			panic(fmt.Sprintf("Failed to download outputs for %s: %s", target, err))
+			return fmt.Errorf("Failed to download outputs for %s: %s", target, err)
 		}
 	}
+	return nil
+}
+
+// WaitForTargetAndEnsureDownload waits for the target to be built and then downloads it if executing remotely
+func (state *BuildState) WaitForTargetAndEnsureDownload(l, dependent BuildLabel) *BuildTarget {
+	return state.waitForTargetAndEnsureDownload(l, dependent, true)
+}
+
+// WaitForInitialTargetAndEnsureDownload is like WaitForTargetAndEnsureDownload but is used for
+// targets in the initial set.
+func (state *BuildState) WaitForInitialTargetAndEnsureDownload(l, dependent BuildLabel) *BuildTarget {
+	return state.waitForTargetAndEnsureDownload(l, dependent, false)
+}
+
+func (state *BuildState) waitForTargetAndEnsureDownload(l, dependent BuildLabel, forSubinclude bool) *BuildTarget {
+	target := state.waitForBuiltTarget(l, dependent, forSubinclude)
+	if err := state.EnsureDownloaded(target); err != nil {
+		panic(fmt.Errorf("failed to download target outputs: %w", err))
+	}
+	return target
 }
 
 // QueueTarget adds a single target to the build queue.
-func (state *BuildState) QueueTarget(label, dependent BuildLabel, rescan, forceBuild bool) error {
+func (state *BuildState) QueueTarget(label, dependent BuildLabel, forceBuild bool) error {
+	return state.queueTarget(label, dependent, forceBuild, false)
+}
+
+func (state *BuildState) queueTarget(label, dependent BuildLabel, forceBuild, neededForSubinclude bool) error {
 	target := state.Graph.Target(label)
 	if target == nil {
 		// If the package isn't loaded yet, we need to queue a parse for it.
 		if state.Graph.PackageByLabel(label) == nil {
-			state.AddPendingParse(label, dependent, forceBuild)
+			state.addPendingParse(label, dependent, forceBuild)
 			return nil
 		}
 		// Package is loaded but target doesn't exist in it. Check again to avoid nasty races.
@@ -762,54 +939,118 @@ func (state *BuildState) QueueTarget(label, dependent BuildLabel, rescan, forceB
 			return fmt.Errorf("Target %s (referenced by %s) doesn't exist", label, dependent)
 		}
 	}
-	if target.State() >= Active && !rescan && !forceBuild {
-		return nil // Target is already tagged to be built and likely on the queue.
+	if dependent.IsAllTargets() || dependent == OriginalTarget {
+		return state.queueResolvedTarget(target, forceBuild, neededForSubinclude)
 	}
-	// Only do this bit if we actually need to build the target
-	if !target.SyncUpdateState(Inactive, Semiactive) && !rescan && !forceBuild {
-		return nil
-	}
-	target.NeededForSubinclude = target.NeededForSubinclude || forceBuild
-	if state.NeedBuild || forceBuild {
-		if target.SyncUpdateState(Semiactive, Active) {
-			state.AddActiveTarget()
-			if target.IsTest && state.NeedTests {
-				if state.TestSequentially {
-					atomic.AddInt64(&state.progress.numActive, 1)
-				} else {
-					// Tests count however many times we're going to run them if parallel.
-					atomic.AddInt64(&state.progress.numActive, int64(state.NumTestRuns))
-				}
+	for _, l := range target.ProvideFor(state.Graph.TargetOrDie(dependent)) {
+		if l == label {
+			if err := state.queueResolvedTarget(target, forceBuild, neededForSubinclude); err != nil {
+				return err
 			}
-		}
-	}
-	// If this target has no deps, add it to the queue now, otherwise handle its deps.
-	// Only add if we need to build targets (not if we're just parsing) but we might need it to parse...
-	if target.State() == Active && state.Graph.AllDepsBuilt(target) {
-		if target.SyncUpdateState(Active, Pending) {
-			state.AddPendingBuild(label, dependent.IsAllTargets())
-		}
-		if !rescan {
-			return nil
-		}
-	}
-	for _, dep := range target.DeclaredDependencies() {
-		// Check the require/provide stuff; we may need to add a different target.
-		if len(target.Requires) > 0 {
-			if depTarget := state.Graph.Target(dep); depTarget != nil && len(depTarget.Provides) > 0 {
-				for _, provided := range depTarget.ProvideFor(target) {
-					if err := state.QueueTarget(provided, label, false, forceBuild); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-		}
-		if err := state.QueueTarget(dep, label, false, forceBuild); err != nil {
+		} else if err := state.queueTarget(l, dependent, forceBuild, neededForSubinclude); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// QueueTestTarget adds a target to the queue to be tested.
+func (state *BuildState) QueueTestTarget(target *BuildTarget) {
+	state.queueTargetData(target)
+	state.AddPendingTest(target)
+}
+
+// queueTargetData queues up builds of the target's runtime data.
+func (state *BuildState) queueTargetData(target *BuildTarget) {
+	for _, data := range target.AllData() {
+		if l, ok := data.Label(); ok {
+			state.WaitForBuiltTarget(l, target.Label)
+		}
+	}
+}
+
+// queueResolvedTarget is like queueTarget but once we have a resolved target.
+func (state *BuildState) queueResolvedTarget(target *BuildTarget, forceBuild, neededForSubinclude bool) error {
+	if neededForSubinclude {
+		target.neededForSubinclude.SetTrue()
+	}
+	if target.State() >= Active && !forceBuild {
+		return nil // Target is already tagged to be built and likely on the queue.
+	}
+
+	queueAsync := func(shouldBuild bool) {
+		if target.IsTest() && state.NeedTests {
+			if state.TestSequentially {
+				state.addActiveTargets(2) // One for build & one for test
+			} else {
+				// Tests count however many times we're going to run them if parallel.
+				state.addActiveTargets(int(1 + state.NumTestRuns))
+			}
+		} else {
+			state.addActiveTargets(1)
+		}
+		// Actual queuing stuff now happens asynchronously in here.
+		atomic.AddInt64(&state.progress.numPending, 1)
+		go state.queueTargetAsync(target, forceBuild, shouldBuild)
+	}
+
+	// Here we want to ensure we don't queue the target every time; ideally we only do it once.
+	// However we might need to do it twice if the initial request doesn't require it to be built
+	// but a later one does.
+	if state.NeedBuild || forceBuild {
+		if target.SyncUpdateState(Inactive, Active) || target.SyncUpdateState(Semiactive, Active) {
+			queueAsync(true)
+		}
+	} else if target.SyncUpdateState(Inactive, Semiactive) {
+		queueAsync(false)
+	}
+	return nil
+}
+
+// queueTarget enqueues a target's dependencies and the target itself once they are done.
+func (state *BuildState) queueTargetAsync(target *BuildTarget, forceBuild, building bool) {
+	defer state.taskDone(true)
+	for _, dep := range target.DeclaredDependencies() {
+		if err := state.queueTarget(dep, target.Label, forceBuild, false); err != nil {
+			state.asyncError(dep, err)
+			return
+		}
+	}
+	for {
+		var called atomicBool
+		if err := target.resolveDependencies(state.Graph, func(t *BuildTarget) error {
+			called.SetTrue()
+			return state.queueResolvedTarget(t, forceBuild, false)
+		}); err != nil {
+			state.asyncError(target.Label, err)
+			return
+		}
+		// Wait for these targets to actually build.
+		if building {
+			for _, t := range target.Dependencies() {
+				t.WaitForBuild()
+			}
+		}
+		if !called.Value() {
+			// We are now ready to go, we have nothing to wait for.
+			if building && target.SyncUpdateState(Active, Pending) {
+				// If we're going to run the target, we need its runtime data to be done. This has to
+				// happen before we build it otherwise remote downloads will fail.
+				if state.NeedRun && state.IsOriginalTarget(target) {
+					state.queueTargetData(target)
+				}
+				state.addPendingBuild(target)
+			}
+			return
+		}
+	}
+}
+
+// asyncError reports an error that's happened in an asynchronous function.
+func (state *BuildState) asyncError(label BuildLabel, err error) {
+	log.Error("Error queuing %s: %s", label, err)
+	state.LogBuildError(0, label, TargetBuildFailed, err, "")
+	state.Stop()
 }
 
 // ForTarget returns the state associated with a given target.
@@ -823,49 +1064,103 @@ func (state *BuildState) ForTarget(target *BuildTarget) *BuildState {
 
 // ForArch creates a copy of this BuildState for a different architecture.
 func (state *BuildState) ForArch(arch cli.Arch) *BuildState {
-	// Check if we've got this one already.
-	// N.B. This implicitly handles the case of the host architecture
-	if s := state.findArch(arch); s != nil {
-		return s
+	state.progress.mutex.Lock()
+	defer state.progress.mutex.Unlock()
+
+	for _, s := range state.progress.allStates {
+		if s.Arch == arch {
+			return s
+		}
 	}
+
 	// Copy with the architecture-specific config file.
 	// This is slightly wrong in that other things (e.g. user-specified command line overrides) should
 	// in fact take priority over this, but that's a lot more fiddly to get right.
-	s := state.ForConfig(".plzconfig_" + arch.String())
-	s.Config.Build.Arch = arch
+
+	// Duplicate & alter configuration
+	s := &BuildState{}
+	*s = *state
+
+	config := state.Config.copyConfig()
+	if err := readConfigFile(config, ".plzconfig_"+arch.String(), false); err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	s.Config = config
+	s.Arch = arch
+
+	s.Parser.NewParser(s)
+	go s.Parser.Init(s)
+	state.progress.allStates = append(state.progress.allStates, s)
+
 	return s
 }
 
-// findArch returns an existing state for the given architecture, if one exists.
-func (state *BuildState) findArch(arch cli.Arch) *BuildState {
+// ForSubrepo creates a new state for the given subrepo
+func (state *BuildState) ForSubrepo(name string, bazelCompat bool) *BuildState {
 	state.progress.mutex.Lock()
 	defer state.progress.mutex.Unlock()
+
 	for _, s := range state.progress.allStates {
-		if s.Config.Build.Arch == arch {
+		if s.CurrentSubrepo == name {
 			return s
+		}
+	}
+
+	s := &BuildState{}
+	*s = *state
+
+	s.Config = state.Config.copyConfig()
+
+	s.CurrentSubrepo = name
+	s.ParentState = state
+
+	if bazelCompat {
+		s.Config.Bazel.Compatibility = true
+		s.Config.Parse.BuildFileName = append(state.Config.Parse.BuildFileName, "BUILD.bazel")
+	}
+
+	s.Parser.NewParser(s)
+	state.progress.allStates = append(state.progress.allStates, s)
+
+	return s
+}
+
+// DownloadInputsIfNeeded downloads all the inputs (or runtime files) for a target if we are building remotely.
+func (state *BuildState) DownloadInputsIfNeeded(tid int, target *BuildTarget, runtime bool) error {
+	if state.RemoteClient != nil {
+		state.LogBuildResult(tid, target, TargetBuilding, "Downloading inputs...")
+		for input := range state.IterInputs(target, runtime) {
+			if l, ok := input.Label(); ok {
+				dep := state.Graph.TargetOrDie(l)
+				if s := dep.State(); s == BuiltRemotely || s == ReusedRemotely {
+					if err := state.RemoteClient.Download(dep); err != nil {
+						return err
+					}
+				}
+			}
 		}
 	}
 	return nil
 }
 
-// ForConfig creates a copy of this BuildState based on the given config files.
-func (state *BuildState) ForConfig(config ...string) *BuildState {
-	state.progress.mutex.Lock()
-	defer state.progress.mutex.Unlock()
-	// Duplicate & alter configuration
-	c := &Configuration{}
-	*c = *state.Config
-	c.buildEnvStored = &storedBuildEnv{}
-	for _, filename := range config {
-		if err := readConfigFile(c, filename); err != nil {
-			log.Fatalf("Failed to read config file %s: %s", filename, err)
-		}
+// IterInputs returns a channel that iterates all the input files needed for a target.
+func (state *BuildState) IterInputs(target *BuildTarget, test bool) <-chan BuildInput {
+	if !test {
+		return IterInputs(state, state.Graph, target, true, target.IsFilegroup)
 	}
-	s := &BuildState{}
-	*s = *state
-	s.Config = c
-	state.progress.allStates = append(state.progress.allStates, s)
-	return s
+	ch := make(chan BuildInput)
+	go func() {
+		ch <- target.Label
+		for _, datum := range target.AllData() {
+			ch <- datum
+		}
+		for _, datum := range target.AllTestTools() {
+			ch <- datum
+		}
+		close(ch)
+	}()
+	return ch
 }
 
 // DisableXattrs disables xattr support for this build. This is done for filesystems that
@@ -875,36 +1170,88 @@ func (state *BuildState) DisableXattrs() {
 	state.PathHasher.DisableXattrs()
 }
 
+func (state *BuildState) Root() *BuildState {
+	if state.ParentState == nil {
+		return state
+	}
+	return state.ParentState.Root()
+}
+
+func newCRC32() hash.Hash {
+	return hash.Hash(crc32.NewIEEE())
+}
+
+func newCRC64() hash.Hash {
+	return hash.Hash(crc64.New(crc64.MakeTable(crc64.ISO)))
+}
+
+func newBlake3() hash.Hash {
+	// 32 bytes == 256 bits
+	return blake3.New(32, nil)
+}
+
+func newXXHash() hash.Hash {
+	return xxhash.New()
+}
+
+func executorFromConfig(config *Configuration) *process.Executor {
+	tool := config.Sandbox.Tool
+	if !filepath.IsAbs(tool) {
+		var err error
+		tool, err = LookBuildPath(tool, config)
+		if err != nil && (config.Sandbox.Build || config.Sandbox.Test) {
+			log.Warningf("Can't find sandbox tool %v on the path: %v", config.Sandbox.Tool, err)
+		}
+	} else if !fs.FileExists(tool) {
+		log.Warningf("Sandbox tool doesn't exist: %v", tool)
+	}
+
+	return process.NewSandboxingExecutor(
+		config.Sandbox.Tool == "" && (config.Sandbox.Build || config.Sandbox.Test),
+		process.NamespacingPolicy(config.Sandbox.Namespace),
+		tool,
+	)
+}
+
 // NewBuildState constructs and returns a new BuildState.
 // Everyone should use this rather than attempting to construct it themselves;
 // callers can't initialise all the required private fields.
 func NewBuildState(config *Configuration) *BuildState {
-	// Deliberately ignore the error here so we don't require the sandbox tool until it's needed.
-	sandboxTool, _ := LookBuildPath(config.Build.PleaseSandboxTool, config)
+	graph := NewGraph()
 	state := &BuildState{
-		Graph:        NewGraph(),
-		pendingTasks: queue.NewPriorityQueue(10000, true), // big hint, why not
+		Graph:                graph,
+		pendingParses:        make(chan ParseTask, 10000),
+		pendingActions:       make(chan Task, 1000),
+		pendingRemoteActions: make(chan Task, 1000),
 		hashers: map[string]*fs.PathHasher{
 			// For compatibility reasons the sha1 hasher has no suffix.
-			"sha1":   fs.NewPathHasher(RepoRoot, config.Build.Xattrs, sha1.New, ""),
-			"sha256": fs.NewPathHasher(RepoRoot, config.Build.Xattrs, sha256.New, "_sha256"),
+			"sha1":   fs.NewPathHasher(RepoRoot, config.Build.Xattrs, sha1.New, "sha1"),
+			"sha256": fs.NewPathHasher(RepoRoot, config.Build.Xattrs, sha256.New, "sha256"),
+			"crc32":  fs.NewPathHasher(RepoRoot, config.Build.Xattrs, newCRC32, "crc32"),
+			"crc64":  fs.NewPathHasher(RepoRoot, config.Build.Xattrs, newCRC64, "crc64"),
+			"blake3": fs.NewPathHasher(RepoRoot, config.Build.Xattrs, newBlake3, "blake3"),
+			"xxhash": fs.NewPathHasher(RepoRoot, config.Build.Xattrs, newXXHash, "xxhash"),
 		},
-		ProcessExecutor: process.New(sandboxTool),
+		ProcessExecutor: executorFromConfig(config),
 		StartTime:       startTime,
 		Config:          config,
+		RepoConfig:      config,
 		VerifyHashes:    true,
 		NeedBuild:       true,
 		XattrsSupported: config.Build.Xattrs,
+		anyRemote:       config.NumRemoteExecutors() > 0,
 		Coverage:        TestCoverage{Files: map[string][]LineCoverage{}},
-		OriginalArch:    cli.HostArch(),
-		Stats:           &SystemStats{},
+		TargetArch:      config.Build.Arch,
+		Arch:            cli.HostArch(),
+		stats:           &lockedStats{},
 		progress: &stateProgress{
 			numActive:       1, // One for the initial target adding on the main thread.
-			numRunning:      1, // Similarly.
 			numPending:      1,
-			pendingTargets:  map[BuildLabel]chan struct{}{},
-			pendingPackages: map[packageKey]chan struct{}{},
-			success:         true,
+			pendingTargets:  cmap.New[BuildLabel, chan struct{}](cmap.DefaultShardCount, hashBuildLabel),
+			pendingPackages: cmap.New[packageKey, chan struct{}](cmap.DefaultShardCount, hashPackageKey),
+			packageWaits:    cmap.New[packageKey, chan struct{}](cmap.DefaultShardCount, hashPackageKey),
+			internalResults: make(chan *BuildResult, 1000),
+			cycleDetector:   cycleDetector{graph: graph},
 		},
 	}
 	state.PathHasher = state.Hasher(config.Build.HashFunction)
@@ -913,6 +1260,7 @@ func NewBuildState(config *Configuration) *BuildState {
 	for _, exp := range config.Parse.ExperimentalDir {
 		state.experimentalLabels = append(state.experimentalLabels, BuildLabel{PackageName: exp, Name: "..."})
 	}
+	go state.forwardResults()
 	return state
 }
 
@@ -931,6 +1279,8 @@ type BuildResult struct {
 	Time time.Time
 	// Target which has just changed
 	Label BuildLabel
+	// Target which has changed. Nil if it's a parse action.
+	target *BuildTarget
 	// Its current status
 	Status BuildResultStatus
 	// Error, only populated for failure statuses
@@ -965,13 +1315,18 @@ func (s BuildResultStatus) Category() string {
 	switch s {
 	case PackageParsing, PackageParsed, ParseFailed:
 		return "Parse"
-	case TargetBuilding, TargetBuildStopped, TargetBuilt, TargetBuildFailed:
+	case TargetBuilding, TargetBuildStopped, TargetBuilt, TargetCached, TargetBuildFailed:
 		return "Build"
 	case TargetTesting, TargetTestStopped, TargetTested, TargetTestFailed:
 		return "Test"
 	default:
 		return "Other"
 	}
+}
+
+// IsParse returns true if this status is a parse event
+func (s BuildResultStatus) IsParse() bool {
+	return s == PackageParsing || s == PackageParsed || s == ParseFailed
 }
 
 // IsFailure returns true if this status represents a failure.

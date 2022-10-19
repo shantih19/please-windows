@@ -1,4 +1,4 @@
-subinclude("//build_defs:plz_e2e_test")
+subinclude("//test/build_defs")
 
 # Test for a panic provoked by a python_library using a proto_library as a resource.
 proto_library(
@@ -11,6 +11,7 @@ python_library(
     name = "proto_lib",
     srcs = ["proto_lib.py"],
     resources = [":test_proto"],
+    deps = [":test_proto"],
 )
 
 python_test(
@@ -125,16 +126,6 @@ python_test(
 )
 
 python_test(
-    name = "numpy_test",
-    srcs = ["numpy_test.py"],
-    labels = [
-        "py3",
-        "pip",
-    ],
-    deps = ["//third_party/python:numpy"],
-)
-
-python_test(
     name = "namespaced_packages_test",
     srcs = ["namespaced_packages_test.py"],
     labels = [
@@ -145,36 +136,6 @@ python_test(
         "//third_party/python:googleapis_common_protos",
         "//third_party/python:protobuf_pip",
     ],
-)
-
-python_test(
-    name = "tensorflow_test",
-    srcs = ["tensorflow_test.py"],
-    labels = [
-        "py3",
-        "pip",
-    ],
-    deps = ["//third_party/python:tensorflow"],
-)
-
-python_test(
-    name = "pandas_test",
-    srcs = ["pandas_test.py"],
-    labels = [
-        "py3",
-        "pip",
-    ],
-    deps = ["//third_party/python:pandas"],
-)
-
-python_test(
-    name = "scipy_test",
-    srcs = ["scipy_test.py"],
-    labels = [
-        "py3",
-        "pip",
-    ],
-    deps = ["//third_party/python:scipy"],
 )
 
 python_test(
@@ -200,18 +161,12 @@ python_test(
     labels = ["py3"],
 )
 
-plz_e2e_test(
-    name = "correct_labels_on_pip_libary_non_zip_safe",
-    cmd = "plz query print -f labels //third_party/python:numpy",
-    expected_output = "expected_labels_on_numpy.txt",
-    labels = ["py3"],
-    deps = ["//third_party/python:numpy"],
-)
-
-plz_e2e_test(
-    name = "correct_labels_on_pip_libary_zip_safe",
-    cmd = "plz query print -f labels //third_party/python:grpcio",
-    expected_output = "expected_labels_on_grpcio.txt",
-    labels = ["py3"],
-    deps = ["//third_party/python:grpcio"],
+python_test(
+    name = "cx_oracle_darwin_build_test",
+    srcs = ["cx_oracle_darwin_build_test.py"],
+    labels = [
+        "py3",
+        "pip",
+    ],
+    deps = ["//third_party/python:cx_oracle"],
 )

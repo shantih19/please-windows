@@ -1,604 +1,807 @@
 package(default_visibility = ["PUBLIC"])
 
-# This is needed to break a circular dependency.
-package(jarcat_tool = "//:jarcat_unzip")
+go_toolchain(
+    name = "toolchain",
+    hashes = [
+        "df6509885f65f0d7a4eaf3dfbe7dda327569787e8a0a31cbf99ae3a6e23e9ea8",  # darwin_amd64
+        "859e0a54b7fcea89d9dd1ec52aab415ac8f169999e5fdfb0f0c15b577c4ead5e",  # darwin_arm64
+        "eca1a8f7b6ff6146efc285eed581096b12b59c1f0488bfe98ed053ab205267ca",  # freebsd_amd64
+        "464b6b66591f6cf055bc5df90a9750bf5fbc9d038722bb84a9d56a2bea974be6",  # linux_amd64
+    ],
+    version = "1.19",
+)
 
-go_get(
+go_module(
     name = "logging",
-    get = "gopkg.in/op/go-logging.v1",
-    revision = "b2cb9fa56473e98db8caba80237377e83fe44db5",
+    licences = ["BSD-3-Clause"],
+    module = "gopkg.in/op/go-logging.v1",
+    version = "v1.0.0-20160211212156-b2cb9fa56473",
+    visibility = [
+        "//src/build:build_step_test",
+        "//src/cli/...",
+        "//src/parse/asp:asp_test",
+        "//src/update:update_test",
+        "//test/...",
+        "//tools/...",
+    ],
 )
 
-go_get(
-    name = "terminal",
-    get = "golang.org/x/crypto/ssh/terminal",
-    revision = "7b85b097bf7527677d54d3220065e966a0e3b613",
+go_module(
+    name = "xcrypto",
+    install = [
+        "cast5",
+        "curve25519",
+        "curve25519/internal/field",
+        "ed25519",
+        "ssh/terminal",
+    ],
+    licences = ["BSD-3-Clause"],
+    module = "golang.org/x/crypto",
+    version = "v0.0.0-20210920023735-84f357641f63",
+    deps = [":xterm"],
 )
 
-go_get(
+go_module(
+    name = "xterm",
+    licences = ["BSD-3-Clause"],
+    module = "golang.org/x/term",
+    version = "v0.0.0-20210615171337-6886f2dfbf5b",
+    visibility = ["PUBLIC"],
+    deps = [":xsys"],
+)
+
+go_module(
+    name = "go-crypto",
+    install = [
+        "bitcurves",
+        "brainpool",
+        "cast5",
+        "curve25519",
+        "eax",
+        "ed25519",
+        "internal/byteutil",
+        "internal/randutil",
+        "internal/syscall/...",
+        "ocb",
+        "openpgp/...",
+        "rand",
+        "rsa",
+    ],
+    licences = ["BSD-3-Clause"],
+    module = "github.com/ProtonMail/go-crypto",
+    # IMPORTANT!!! Don't update until https://github.com/ProtonMail/go-crypto/issues/88 has been resolved
+    version = "3900d675f39ba9686203d137886d74fad620ae87",
+    visibility = ["PUBLIC"],
+    deps = [":xcrypto"],
+)
+
+go_module(
     name = "warnings",
-    get = "gopkg.in/warnings.v0",
-    revision = "v0.1.2",
+    licences = ["BSD-2-Clause"],
+    module = "gopkg.in/warnings.v0",
+    version = "v0.1.2",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "gcfg",
-    get = "github.com/peterebden/gcfg/...",
-    revision = "v1.3.0",
+    install = [
+        "...",
+    ],
+    module = "github.com/please-build/gcfg",
+    version = "9b4d14cddd6148920e11c8bb7ee19369473b1019",
     deps = [
         ":warnings",
     ],
 )
 
-go_get(
+go_module(
     name = "xattr",
-    get = "github.com/pkg/xattr",
-    revision = "v0.4.1",
+    licences = ["BSD-2-Clause"],
+    module = "github.com/pkg/xattr",
+    version = "v0.4.3",
+    visibility = ["PUBLIC"],
     deps = [":xsys"],
 )
 
-go_get(
-    name = "go-bindata",
-    binary = True,
-    get = "github.com/kevinburke/go-bindata/...",
-    revision = "v3.21.0",
-    strip = ["testdata"],
-)
-
-go_get(
+go_module(
     name = "go-flags",
-    get = "github.com/jessevdk/go-flags",
-    patch = "flags_subcommand.patch",
-    revision = "v1.4.0",
+    licences = ["BSD-3-Clause"],
+    module = "github.com/thought-machine/go-flags",
+    version = "v1.6.2",
+    visibility = ["PUBLIC"],
+    deps = [":xsys"],
 )
 
-go_get(
+go_module(
     name = "humanize",
-    get = "github.com/dustin/go-humanize",
-    revision = "8929fe90cee4b2cb9deb468b51fb34eba64d1bf0",
+    licences = ["MIT"],
+    module = "github.com/dustin/go-humanize",
+    version = "v1.0.0",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "net",
-    get = "golang.org/x/net/...",
-    revision = "136a25c244d3019482a795d728110278d6ba09a4",
+    install = ["..."],
+    module = "golang.org/x/net",
+    version = "853a461950ffd0dac439017081f0f3bd9242bb17",
     deps = [
-        ":terminal",
         ":text",
+        ":xcrypto",
     ],
 )
 
-go_get(
+go_module(
     name = "tools",
-    get = "golang.org/x/tools",
     install = [
+        "internal/gocommand",
         "cover",
+        "go/internal/cgo",
+        "go/packages",
+        "internal/event",
+        "benchmark/parse",
+        "go/internal/packagesdriver",
+        "internal/event/core",
+        "internal/event/keys",
+        "internal/event/label",
+        "internal/packagesinternal",
+        "internal/typesinternal",
+        "go/ast/astutil",
+        "go/gcexportdata",
+        "go/internal/gcimporter",
+        "go/loader",
+        "internal/typeparams",
+        "go/buildutil",
     ],
-    revision = "2ae76fd1560b622911f444c1e66b70a857e1de67",
-)
-
-go_get(
-    name = "text",
-    get = "golang.org/x/text/...",
-    revision = "4e4a3210bb54bb31f6ab2cdca2edcc0b50c420c1",
+    licences = ["BSD-3-Clause"],
+    module = "golang.org/x/tools",
+    version = "v0.1.5",
+    visibility = ["PUBLIC"],
     deps = [
-        ":tools",
-    ],
-)
-
-go_get(
-    name = "cover",
-    get = "github.com/peterebden/tools/cover",
-    revision = "b2a0db951d2a49fe30dfd9a5f4aad49df75fc12f",
-)
-
-go_get(
-    name = "grpc",
-    exported_deps = [":net"],
-    get = "google.golang.org/grpc",
-    install = [
-        "",
-        "attributes",
-        "backoff",
-        "balancer",
-        "balancer/base",
-        "balancer/grpclb/...",
-        "balancer/roundrobin",
-        "binarylog/...",
-        "codes",
-        "connectivity",
-        "credentials/...",
-        "encoding",
-        "encoding/gzip",
-        "encoding/proto",
-        "grpclog",
-        "health",
-        "health/grpc_health_v1",
-        "internal/...",
-        "keepalive",
-        "metadata",
-        "peer",
-        "resolver",
-        "resolver/dns",
-        "resolver/passthrough",
-        "serviceconfig",
-        "stats",
-        "status",
-        "tap",
-    ],
-    repo = "github.com/grpc/grpc-go",
-    revision = "v1.31.1",
-    deps = [
-        ":cmp",
-        ":oauth2",
-        ":protobuf",
-        ":rpccode",
-        ":rpcstatus",
+        ":mod",
+        ":xerrors",
         ":xsys",
     ],
 )
 
-#TODO: build from the actual proto.
-go_get(
-    name = "rpcstatus",
-    get = "google.golang.org/genproto/googleapis/rpc/status",
-    revision = "2b5a72b8730b0b16380010cfe5286c42108d88e7",
-    deps = [":protobuf"],
+go_module(
+    name = "text",
+    install = [
+        "encoding/...",
+        "secure/...",
+        "unicode/...",
+        "transform",
+    ],
+    licences = ["BSD-3-Clause"],
+    module = "golang.org/x/text",
+    version = "v0.3.7",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
-    name = "rpccode",
-    get = "google.golang.org/genproto/googleapis/rpc/code",
-    revision = "2b5a72b8730b0b16380010cfe5286c42108d88e7",
-    deps = [":protobuf"],
+go_module(
+    name = "cover",
+    install = ["cover"],
+    licences = ["BSD-3-Clause"],
+    module = "github.com/peterebden/tools",
+    version = "v0.0.0-20190805132753-b2a0db951d2a",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
-    name = "protobuf",
-    get = "github.com/golang/protobuf/...",
-    revision = "v1.3.2",
-    strip = [
-        "proto/proto3_proto",
-        "conformance",
+go_module(
+    name = "grpc",
+    install = [
+        "balancer/grpclb/...",
+        "binarylog/...",
+        "internal/status",
+        "backoff",
+        "encoding/gzip",
+        "encoding/proto",
+        "health/grpc_health_v1",
+        "internal/resolver",
+        "internal/resolver/dns",
+        "balancer/roundrobin",
+        "internal/buffer",
+        "peer",
+        "internal/grpcsync",
+        "internal/grpcutil",
+        "resolver",
+        "internal/transport/networktype",
+        "metadata",
+        "attributes",
+        "connectivity",
+        "credentials/oauth",
+        "grpclog",
+        "health",
+        "internal/grpcrand",
+        "serviceconfig",
+        "internal/grpclog",
+        "internal/metadata",
+        ".",
+        "codes",
+        "encoding",
+        "internal/backoff",
+        "internal/balancerload",
+        "internal/channelz",
+        "internal/syscall",
+        "resolver/dns",
+        "balancer/base",
+        "internal",
+        "internal/binarylog",
+        "resolver/passthrough",
+        "tap",
+        "credentials",
+        "internal/envconfig",
+        "internal/transport",
+        "stats",
+        "status",
+        "balancer",
+        "internal/credentials",
+        "internal/resolver/passthrough",
+        "internal/resolver/unix",
+        "internal/serviceconfig",
+        "keepalive",
+    ],
+    licences = ["Apache-2.0"],
+    module = "google.golang.org/grpc",
+    version = "v1.40.0",
+    visibility = ["PUBLIC"],
+    deps = [
+        ":genproto_rpc",
+        ":net",
+        ":oauth2",
+        ":protobuf",
+        ":protobuf-go",
+        ":xsys",
     ],
 )
 
-go_get(
+go_mod_download(
+    name = "genproto_download",
+    licences = ["Apache-2.0"],
+    module = "google.golang.org/genproto",
+    version = "v0.0.0-20210917145530-b395a37504d4",
+)
+
+# genproto stuff for grpc to resolve cyclic deps
+go_module(
+    name = "genproto_rpc",
+    download = ":genproto_download",
+    install = [
+        "googleapis/rpc/...",
+    ],
+    module = "google.golang.org/genproto",
+    deps = [
+        ":protobuf-go",
+    ],
+)
+
+go_module(
+    name = "genproto_api",
+    download = ":genproto_download",
+    exported_deps = [":genproto_rpc"],
+    install = [
+        "googleapis/api/annotations",
+        "googleapis/bytestream",
+        "googleapis/longrunning",
+    ],
+    module = "google.golang.org/genproto",
+    visibility = ["PUBLIC"],
+    deps = [
+        ":grpc",
+        ":protobuf-go",
+    ],
+)
+
+go_module(
+    name = "bundler",
+    install = ["support/bundler"],
+    licences = ["BSD-3-Clause"],
+    module = "google.golang.org/api",
+    version = "v0.30.0",
+    visibility = ["PUBLIC"],
+    deps = [":errgroup"],
+)
+
+go_mod_download(
+    name = "protobuf_download",
+    licences = ["BSD-3-Clause"],
+    module = "github.com/golang/protobuf",
+    version = "v1.5.2",
+)
+
+go_module(
+    name = "protobuf",
+    download = ":protobuf_download",
+    exported_deps = [
+        ":protobuf-go",
+    ],
+    install = ["..."],
+    module = "github.com/golang/protobuf",
+)
+
+go_module(
     name = "protoc-gen-go",
     binary = True,
-    get = [],
-    install = ["github.com/golang/protobuf/protoc-gen-go"],
+    download = ":protobuf_download",
+    exported_deps = [":protobuf"],
+    install = ["protoc-gen-go"],
+    module = "github.com/golang/protobuf",
+    visibility = ["PUBLIC"],
+    deps = [":protobuf-go"],
+)
+
+go_module(
+    name = "protobuf-go",
+    install = ["..."],
+    module = "google.golang.org/protobuf",
+    version = "v1.25.0",
     deps = [
-        ":protobuf",
+        ":cmp",
     ],
 )
 
-go_get(
-    name = "spew",
-    get = "github.com/davecgh/go-spew/spew",
-    licences = ["ISC"],
-    patch = "spew_omit_empty.patch",
-    revision = "ecdeabc65495df2dec95d7c4a4c3e021903035e5",
+go_module(
+    name = "xerrors",
+    install = ["..."],
+    module = "golang.org/x/xerrors",
+    version = "5ec99f83aff198f5fbd629d6c8d8eb38a04218ca",
 )
 
-go_get(
+go_module(
+    name = "protoc-gen-go-grpc",
+    binary = True,
+    module = "google.golang.org/grpc/cmd/protoc-gen-go-grpc",
+    version = "v1.1.0",
+    visibility = ["PUBLIC"],
+    deps = [":protobuf-go"],
+)
+
+go_module(
+    name = "spew",
+    install = ["spew"],
+    licences = ["ISC"],
+    module = "github.com/davecgh/go-spew",
+    patch = "spew_omit_empty.patch",
+    version = "v1.1.1",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
     name = "testify",
-    get = "github.com/stretchr/testify",
     install = [
         "assert",
         "require",
-        "vendor/...",
     ],
     licences = ["MIT"],
-    revision = "v1.4.0",
+    module = "github.com/stretchr/testify",
+    version = "v1.7.0",
+    visibility = ["PUBLIC"],
     deps = [
         ":difflib",
-        ":objx",
         ":spew",
-        ":yaml.v2",
+        ":yaml",
     ],
 )
 
-go_get(
+go_module(
     name = "difflib",
-    get = "github.com/pmezard/go-difflib/...",
-    licences = ["BSD 3-Clause"],
-    revision = "792786c7400a136282c1664665ae0a8db921c6c2",
+    install = ["difflib"],
+    licences = ["BSD-3-Clause"],
+    module = "github.com/pmezard/go-difflib",
+    version = "v1.0.0",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "objx",
-    get = "github.com/stretchr/objx",
     licences = ["MIT"],
-    revision = "1a9d0bb9f541897e62256577b352fdbc1fb4fd94",
+    module = "github.com/stretchr/objx",
+    version = "v0.3.0",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
-    name = "yaml.v2",
-    get = "gopkg.in/yaml.v2",
-    licences = ["Apache 2.0"],
-    revision = "v2.2.4",
+go_module(
+    name = "yaml",
+    licences = ["MIT"],
+    module = "gopkg.in/yaml.v3",
+    version = "v3.0.0-20210107192922-496545a6307b",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "go-isatty",
-    get = "github.com/mattn/go-isatty",
-    revision = "6ca4dbf54d38eea1a992b3c722a76a5d1c4cb25c",
-)
-
-go_get(
-    name = "levenshtein",
-    get = "github.com/texttheater/golang-levenshtein/levenshtein",
-    revision = "14026fface0cb806188c85e792a93d625dc37d0f",
-)
-
-go_get(
-    name = "queue",
-    get = "github.com/Workiva/go-datastructures/queue",
-    revision = "064f3ea06ab2337e6eaf42052392d14f779e91cb",
-)
-
-go_get(
-    name = "fsnotify",
-    get = "github.com/fsnotify/fsnotify",
-    revision = "a8a77c9133d2d6fd8334f3260d06f60e8d80a5fb",
+    licences = ["MIT"],
+    module = "github.com/mattn/go-isatty",
+    version = "v0.0.14",
+    visibility = ["PUBLIC"],
     deps = [":xsys"],
 )
 
-go_get(
-    name = "concurrent-map",
-    get = "github.com/streamrail/concurrent-map",
-    revision = "5fc745307dc80a1883243b978f7e7c0fd5ce7206",
+go_module(
+    name = "levenshtein",
+    install = ["levenshtein"],
+    licences = ["MIT"],
+    module = "github.com/texttheater/golang-levenshtein",
+    version = "v1.0.1",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
+    name = "fsnotify",
+    licences = ["BSD-3-Clause"],
+    module = "github.com/fsnotify/fsnotify",
+    version = "v1.5.1",
+    visibility = ["PUBLIC"],
+    deps = [":xsys"],
+)
+
+go_module(
     name = "grpc-middleware",
-    get = "github.com/grpc-ecosystem/go-grpc-middleware",
     install = [
         "retry",
-        "util/metautils",
         "util/backoffutils",
+        "util/metautils",
     ],
-    revision = "fa8fef87dcecac0bda02d36abb3c790ab9e0030b",
+    licences = ["Apache-2.0"],
+    module = "github.com/grpc-ecosystem/go-grpc-middleware",
+    version = "v1.3.0",
+    visibility = ["PUBLIC"],
     deps = [
         ":grpc",
         ":net",
-        ":protobuf",
     ],
 )
 
-go_get(
+go_module(
     name = "shlex",
-    get = "github.com/google/shlex",
-    revision = "6f45313302b9c56850fc17f99e40caebce98c716",
+    licences = ["Apache-2.0"],
+    module = "github.com/google/shlex",
+    version = "v0.0.0-20181106134648-c34317bd91bf",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "semver",
-    get = "github.com/coreos/go-semver/semver",
-    revision = "8ab6407b697782a06568d4b7f1db25550ec2e4c6",
+    install = ["semver"],
+    licences = ["Apache-2.0"],
+    module = "github.com/coreos/go-semver",
+    version = "v0.3.0",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "go-multierror",
-    get = "github.com/hashicorp/go-multierror",
-    install = [
-        "",
-        "vendor/github.com/hashicorp/errwrap",
-    ],
-    revision = "b7773ae218740a7be65057fc60b366a49b538a44",
+    licences = ["MPL-2.0"],
+    module = "github.com/hashicorp/go-multierror",
+    version = "v1.1.1",
+    visibility = ["PUBLIC"],
+    deps = [":errwrap"],
 )
 
-go_get(
+go_module(
+    name = "errwrap",
+    licences = ["MPL-2.0"],
+    module = "github.com/hashicorp/errwrap",
+    version = "v1.1.0",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
     name = "atime",
-    get = "github.com/djherbis/atime",
-    revision = "89517e96e10b93292169a79fd4523807bdc5d5fa",
+    licences = ["MIT"],
+    module = "github.com/djherbis/atime",
+    version = "v1.1.0",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "errgroup",
-    get = "golang.org/x/sync/errgroup",
-    revision = "457c5828408160d6a47e17645169cf8fa20218c4",
-    deps = [":net"],
+    install = [
+        "errgroup",
+        "semaphore",
+    ],
+    licences = ["BSD-3-Clause"],
+    module = "golang.org/x/sync",
+    version = "v0.0.0-20220722155255-886fb9371eb4",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "psutil",
-    get = "github.com/shirou/gopsutil",
     install = [
         "cpu",
         "internal/common",
         "mem",
     ],
-    revision = "v2.17.09",
+    licences = ["BSD-3-Clause"],
+    module = "github.com/shirou/gopsutil/v3",
+    version = "v3.22.6",
+    visibility = ["PUBLIC"],
+    deps = [
+        ":sysconf",
+        ":xsys",
+    ],
+)
+
+go_module(
+    name = "sysconf",
+    licences = ["BSD-3-Clause"],
+    module = "github.com/tklauser/go-sysconf",
+    version = "v0.3.9",
+    visibility = ["PUBLIC"],
+    deps = [
+        ":numcpus",
+        ":xsys",
+    ],
+)
+
+go_module(
+    name = "numcpus",
+    licences = ["Apache-2.0"],
+    module = "github.com/tklauser/numcpus",
+    version = "v0.3.0",
+    visibility = ["PUBLIC"],
     deps = [":xsys"],
 )
 
-go_get(
+go_module(
     name = "xsys",
-    get = "golang.org/x/sys/...",
-    revision = "765f4ea38db36397e827c4153018aa272eed7835",
+    install = ["..."],
+    module = "golang.org/x/sys",
+    version = "v0.0.0-20220315194320-039c03cc5b86",
 )
 
-go_get(
-    name = "openpgp",
-    get = "golang.org/x/crypto/openpgp/...",
-    revision = "077efaa604f994162e3307fafe5954640763fc08",
-    deps = [":cast5"],
-)
-
-go_get(
-    name = "cast5",
-    get = "golang.org/x/crypto/cast5",
-    revision = "077efaa604f994162e3307fafe5954640763fc08",
-)
-
-go_get(
-    name = "go-fuzz-build",
-    binary = True,
-    get = [],
-    install = ["github.com/dvyukov/go-fuzz/go-fuzz-build"],
-    deps = [":go-fuzz-dep"],
-)
-
-go_get(
-    name = "go-fuzz",
-    binary = True,
-    get = [],
-    install = ["github.com/dvyukov/go-fuzz/go-fuzz"],
-    deps = [":go-fuzz-dep"],
-)
-
-go_get(
-    name = "go-fuzz-dep",
-    get = "github.com/dvyukov/go-fuzz",
-    install = [
-        "go-fuzz-dep",
-        "go-fuzz-defs",
-    ],
-    revision = "445b00a1141b27425541ee8d7dc2f524faf202a9",
-)
-
-go_get(
+go_module(
     name = "godirwalk",
-    get = "github.com/karrick/godirwalk",
-    revision = "v1.7.0",
+    licences = ["BSD-2-Clause"],
+    module = "github.com/karrick/godirwalk",
     strip = [
         "examples",
         "testdata",
         "vendor",
     ],
-    deps = [":errors"],
+    version = "v1.16.1",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "errors",
-    get = "github.com/pkg/errors",
-    revision = "30136e27e2ac8d167177e8a583aa4c3fea5be833",
+    licences = ["BSD-2-Clause"],
+    module = "github.com/pkg/errors",
+    version = "v0.9.1",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "gogo-protobuf",
-    get = "github.com/gogo/protobuf",
     install = ["proto"],
-    revision = "v0.4",
+    licences = ["BSD-3-Clause"],
+    module = "github.com/gogo/protobuf",
+    version = "v1.3.2",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "skylark",
-    get = "go.starlark.net/syntax",
-    revision = "88a10930eb75e9ec92aea441058f24a11184bb2f",
+    install = ["syntax"],
+    module = "go.starlark.net",
+    version = "v0.0.0-20210901212718-87f333178d59",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_mod_download(
+    name = "buildtools_download",
+    module = "github.com/peterebden/buildtools",
+    version = "f7a36c689cc9e038956d51005332c67ade7aa9c6",
+)
+
+go_module(
     name = "buildtools",
-    get = "github.com/bazelbuild/buildtools/...",
-    repo = "github.com/peterebden/buildtools",
-    revision = "f7a36c689cc9e038956d51005332c67ade7aa9c6",
+    download = ":buildtools_download",
+    install = ["..."],
+    module = "github.com/bazelbuild/buildtools",
     deps = [
         ":protobuf",
         ":skylark",
     ],
 )
 
-go_get(
+go_module(
     name = "jsonrpc2",
-    get = "github.com/sourcegraph/jsonrpc2",
-    revision = "549eb959f029d014d623104d40ab966d159a92de",
+    licences = ["MIT"],
+    module = "github.com/sourcegraph/jsonrpc2",
+    version = "v0.1.0",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "xz",
-    get = "github.com/ulikunitz/xz",
     install = [
-        "",
-        "lzma",
         "internal/...",
+        ".",
+        "lzma",
     ],
-    revision = "v0.5.6",
+    licences = ["BSD-3-Clause"],
+    module = "github.com/ulikunitz/xz",
+    version = "v0.5.10",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "ar",
-    get = "github.com/peterebden/ar",
-    revision = "a0ae3a11a518fb9559c95ed151ec07865b31980b",
+    licences = ["MIT"],
+    module = "github.com/peterebden/ar",
+    version = "v0.0.0-20181115090543-a0ae3a11a518",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "cli-init",
-    get = "github.com/peterebden/go-cli-init",
-    revision = "v1.3.1",
+    install = ["..."],
+    module = "github.com/peterebden/go-cli-init/v5",
+    version = "v5.2.0",
     deps = [
         ":go-flags",
         ":humanize",
         ":logging",
-        ":terminal",
+        ":xcrypto",
     ],
 )
 
-go_get(
+go_module(
     name = "diff",
-    get = "github.com/sourcegraph/go-diff/diff",
-    revision = "v0.5.1",
-    deps = [
-        ":gogo-protobuf",
-        ":sqs-pbtypes",
-    ],
+    install = ["diff"],
+    licences = ["MIT"],
+    module = "github.com/sourcegraph/go-diff",
+    version = "v0.6.1",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "sqs-pbtypes",
-    get = "sourcegraph.com/sqs/pbtypes",
-    repo = "github.com/sqs/pbtypes",
-    revision = "v1.0.0",
+    licences = ["Apache-2.0"],
+    module = "sourcegraph.com/sqs/pbtypes",
+    version = "v0.0.0-20180604144634-d3ebe8f20ae4",
+    visibility = ["PUBLIC"],
     deps = [":gogo-protobuf"],
 )
 
-go_get(
+go_module(
     name = "remote-apis",
-    get = "github.com/bazelbuild/remote-apis/build/...",
-    revision = "2846a67ac8feb5001e9f704b66f5acc1e90f1ade",
+    install = ["build/..."],
+    module = "github.com/bazelbuild/remote-apis",
+    version = "3e816456ee28f01ab2e0abf72306c1f340c7b229",
     deps = [
-        ":annotations",
+        ":genproto_api",
         ":grpc",
-        ":longrunning",
-        ":protobuf",
-        ":rpcstatus",
+        ":protobuf-go",
     ],
 )
 
-go_get(
+go_module(
     name = "remote-apis-sdks",
-    get = "github.com/bazelbuild/remote-apis-sdks/go/...",
-    repo = "github.com/peterebden/remote-apis-sdks",
-    revision = "271eb5b72e7dca1dda1d4dee87d99a17194cf146",
+    install = ["go/..."],
+    module = "github.com/bazelbuild/remote-apis-sdks",
+    version = "ddba20599b6eafae1669d4da1aa4772fb8c80efd",
     deps = [
-        ":annotations",
-        ":bytestream",
+        ":bundler",
         ":cmp",
         ":errgroup",
         ":errors",
+        ":genproto_api",
         ":glog",
         ":grpc",
-        ":longrunning",
         ":oauth2",
         ":pborman_uuid",
-        ":protobuf",
+        ":protobuf-go",
         ":remote-apis",
-        ":rpcstatus",
+        ":zstd",
+        ":zstdpool",
     ],
 )
 
-go_get(
+go_module(
     name = "cmp",
-    get = "github.com/google/go-cmp/cmp",
-    revision = "b1c9c4891a6525d98001fea424c8926c6d77bb56",
-)
-
-go_get(
-    name = "glog",
-    get = "github.com/golang/glog",
-    patch = "glog_disable.patch",
-    revision = "23def4e6c14b4da8ac2ed8007337bc5eb5007998",
-)
-
-go_get(
-    name = "cloud-metadata",
-    get = "cloud.google.com/go/compute/metadata",
-    revision = "v0.40.0",
-)
-
-go_get(
-    name = "oauth2",
-    get = "golang.org/x/oauth2",
     install = [
-        "",
+        "cmp/...",
+    ],
+    module = "github.com/google/go-cmp",
+    version = "b1c9c4891a6525d98001fea424c8926c6d77bb56",
+)
+
+go_module(
+    name = "glog",
+    licences = ["Apache-2.0"],
+    module = "github.com/golang/glog",
+    patch = "glog_disable.patch",
+    version = "v0.0.0-20160126235308-23def4e6c14b",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "cloud-metadata",
+    install = ["compute/metadata"],
+    licences = ["Apache-2.0"],
+    module = "cloud.google.com/go",
+    version = "v0.65.0",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "oauth2",
+    install = [
+        "authhandler",
         "google",
+        "google/internal/externalaccount",
         "internal",
         "jws",
         "jwt",
+        ".",
     ],
-    revision = "d668ce993890a79bda886613ee587a69dd5da7a6",
-    visibility = ["//third_party/go/..."],
+    licences = ["BSD-3-Clause"],
+    module = "golang.org/x/oauth2",
+    version = "v0.0.0-20210514164344-f6687ab2804c",
+    visibility = ["PUBLIC"],
     deps = [
         ":cloud-metadata",
-        "//third_party/go:net",
+        ":net",
     ],
 )
 
-# TODO(peterebden): Splitting up this & the other bits of genproto is a bit of
-#                   a hack. Replace once we have a better way of describing Go modules.
-go_get(
-    name = "annotations",
-    get = "google.golang.org/genproto/googleapis/api/annotations",
-    revision = "3bdd9d9f5532d75d09efb230bd767d265245cfe5",
-    deps = [
-        ":grpc",
-        ":protobuf",
-    ],
-)
-
-go_get(
-    name = "longrunning",
-    get = "google.golang.org/genproto/googleapis/longrunning",
-    revision = "3bdd9d9f5532d75d09efb230bd767d265245cfe5",
-    deps = [
-        ":annotations",
-        ":grpc",
-        ":protobuf",
-    ],
-)
-
-go_get(
-    name = "bytestream",
-    get = "google.golang.org/genproto/googleapis/bytestream",
-    revision = "3bdd9d9f5532d75d09efb230bd767d265245cfe5",
-    deps = [
-        ":annotations",
-        ":grpc",
-        ":protobuf",
-    ],
-)
-
-go_get(
+go_module(
     name = "uuid",
-    get = "github.com/google/uuid",
-    revision = "v1.1.1",
+    licences = ["BSD-3-Clause"],
+    module = "github.com/google/uuid",
+    version = "v1.1.2",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "pborman_uuid",
-    get = "github.com/pborman/uuid",
-    revision = "v1.2.0",
+    licences = ["BSD-3-Clause"],
+    module = "github.com/pborman/uuid",
+    version = "v1.2.0",
+    visibility = ["PUBLIC"],
     deps = [":uuid"],
 )
 
-go_get(
+go_module(
     name = "lsp",
-    get = "github.com/sourcegraph/go-lsp",
-    revision = "0c7d621186c1c8684f3d97868f6970b326609cc7",
+    licences = ["MIT"],
+    module = "github.com/sourcegraph/go-lsp",
+    version = "v0.0.0-20200429204803-219e11d77f5d",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "promptui",
-    get = "github.com/manifoldco/promptui/...",
-    revision = "v0.7.0",
+    install = [
+        "...",
+    ],
+    module = "github.com/manifoldco/promptui",
+    version = "v0.7.0",
     deps = [
         ":ansiterm",
         ":readline",
     ],
 )
 
-go_get(
+go_module(
     name = "readline",
-    get = "github.com/chzyer/readline",
-    revision = "2972be24d48e78746da79ba8e24e8b488c9880de",
+    licences = ["MIT"],
+    module = "github.com/chzyer/readline",
+    version = "v0.0.0-20180603132655-2972be24d48e",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "ansiterm",
-    get = "github.com/juju/ansiterm/...",
-    revision = "720a0952cc2ac777afc295d9861263e2a4cf96a1",
+    install = [
+        "...",
+    ],
+    module = "github.com/juju/ansiterm",
+    version = "720a0952cc2ac777afc295d9861263e2a4cf96a1",
     deps = [
         ":colorable",
         ":go-isatty",
@@ -606,39 +809,276 @@ go_get(
     ],
 )
 
-go_get(
+go_module(
     name = "vtclean",
-    get = "github.com/lunixbochs/vtclean",
-    revision = "v1.0.0",
+    licences = ["MIT"],
+    module = "github.com/lunixbochs/vtclean",
+    version = "v1.0.0",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "colorable",
-    get = "github.com/mattn/go-colorable",
-    revision = "v0.1.2",
-    deps = [
-        ":go-isatty",
-    ],
+    licences = ["MIT"],
+    module = "github.com/mattn/go-colorable",
+    version = "v0.1.8",
+    visibility = ["PUBLIC"],
+    deps = [":go-isatty"],
 )
 
-go_get(
+go_module(
     name = "sri",
-    get = "github.com/peterebden/go-sri",
-    revision = "v1.0.0",
+    module = "github.com/peterebden/go-sri",
     test_only = True,
+    version = "v1.1.1",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "go-cleanhttp",
-    get = "github.com/hashicorp/go-cleanhttp",
-    revision = "v0.5.1",
+    licences = ["MPL-2.0"],
+    module = "github.com/hashicorp/go-cleanhttp",
+    version = "v0.5.2",
+    visibility = ["PUBLIC"],
 )
 
-go_get(
+go_module(
     name = "go-retryablehttp",
-    get = "github.com/hashicorp/go-retryablehttp",
-    revision = "v0.6.7",
-    deps = [
-        ":go-cleanhttp",
+    licences = ["MPL-2.0"],
+    module = "github.com/hashicorp/go-retryablehttp",
+    version = "v0.7.0",
+    visibility = ["PUBLIC"],
+    deps = [":go-cleanhttp"],
+)
+
+go_module(
+    name = "goldmark",
+    install = [
+        "...",
     ],
+    module = "github.com/yuin/goldmark",
+    version = "v1.2.1",
+)
+
+go_module(
+    name = "csslex",
+    module = "github.com/x1ddos/csslex",
+    version = "v0.0.0-20160125172232-7894d8ab8bfe",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "sanitized_anchor_name",
+    module = "github.com/shurcooL/sanitized_anchor_name",
+    version = "v1.0.0",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "claat",
+    binary = True,
+    install = [
+        ".",
+        "cmd",
+        "fetch",
+        "fetch/drive/auth",
+        "parser/gdoc",
+        "parser/md",
+        "types",
+        "nodes",
+        "parser",
+        "render",
+        "util",
+    ],
+    module = "github.com/googlecodelabs/tools/claat",
+    version = "v0.0.0-20210914205149-d1177395e3b8",
+    visibility = ["PUBLIC"],
+    deps = [
+        ":csslex",
+        ":goldmark",
+        ":net",
+        ":oauth2",
+    ],
+)
+
+go_module(
+    name = "blake3",
+    licences = ["MIT"],
+    module = "lukechampine.com/blake3",
+    version = "v1.1.5",
+    visibility = ["PUBLIC"],
+    deps = [":cpuid"],
+)
+
+go_module(
+    name = "cpuid",
+    licences = ["MIT"],
+    module = "github.com/klauspost/cpuid",
+    version = "v1.3.1",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "zstd",
+    install = [
+        "zstd/...",
+        "s2",
+        "snappy",
+        ".",
+        "fse",
+        "huff0",
+        "internal/snapref",
+    ],
+    licences = ["Apache-2.0"],
+    module = "github.com/klauspost/compress",
+    version = "v1.13.6",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "zstdpool",
+    licences = ["Apache-2.0"],
+    module = "github.com/mostynb/zstdpool-syncpool",
+    version = "v0.0.7",
+    visibility = ["PUBLIC"],
+    deps = [":zstd"],
+)
+
+go_module(
+    name = "semver2",
+    licences = ["MIT"],
+    module = "github.com/Masterminds/semver/v3",
+    version = "v3.1.1",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "prometheus",
+    install = [
+        "prometheus/internal",
+        "prometheus/push",
+        "prometheus",
+    ],
+    licences = ["Apache-2.0"],
+    module = "github.com/prometheus/client_golang",
+    version = "v1.11.0",
+    visibility = ["PUBLIC"],
+    deps = [
+        ":prometheus_common",
+        ":prometheus_model",
+        ":prometheus_procfs",
+        ":protobuf",
+        ":quantile",
+        ":xxhash",
+    ],
+)
+
+go_module(
+    name = "xxhash",
+    licences = ["MIT"],
+    module = "github.com/cespare/xxhash/v2",
+    version = "v2.1.2",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "prometheus_model",
+    install = ["go"],
+    licences = ["Apache-2.0"],
+    module = "github.com/prometheus/client_model",
+    version = "v0.2.0",
+    visibility = ["PUBLIC"],
+    deps = [":protobuf"],
+)
+
+go_module(
+    name = "prometheus_common",
+    install = [
+        "expfmt",
+        "internal/bitbucket.org/ww/goautoneg",
+        "model",
+    ],
+    licences = ["BSD-3-Clause"],
+    module = "github.com/prometheus/common",
+    version = "v0.30.0",
+    visibility = ["PUBLIC"],
+    deps = [
+        ":pbutil",
+        ":prometheus_model",
+        ":protobuf",
+    ],
+)
+
+go_module(
+    name = "prometheus_procfs",
+    install = [
+        ".",
+        "internal/fs",
+        "internal/util",
+    ],
+    licences = ["Apache-2.0"],
+    module = "github.com/prometheus/procfs",
+    version = "v0.6.0",
+    visibility = ["PUBLIC"],
+    deps = [":xsys"],
+)
+
+go_module(
+    name = "pbutil",
+    install = ["pbutil"],
+    licences = ["Apache-2.0"],
+    module = "github.com/matttproud/golang_protobuf_extensions",
+    version = "v1.0.1",
+    visibility = ["PUBLIC"],
+    deps = [":protobuf"],
+)
+
+go_module(
+    name = "quantile",
+    install = ["quantile"],
+    licences = ["MIT"],
+    module = "github.com/beorn7/perks",
+    version = "v1.0.1",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "automaxprocs",
+    install = [
+        "...",
+    ],
+    licences = ["MIT"],
+    module = "go.uber.org/automaxprocs",
+    version = "v1.4.0",
+)
+
+go_module(
+    name = "deferred_regex",
+    licences = ["Apache-2.0"],
+    module = "github.com/peterebden/go-deferred-regex",
+    version = "v1.0.0",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "snappy",
+    module = "github.com/golang/snappy",
+    version = "v0.0.3",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "mod",
+    install = ["semver"],
+    module = "golang.org/x/mod",
+    version = "v0.5.0",
+    visibility = ["PUBLIC"],
+)
+
+go_module(
+    name = "shellescape",
+    licences = ["MIT"],
+    module = "github.com/alessio/shellescape",
+    version = "v1.4.1",
+    visibility = ["PUBLIC"],
 )

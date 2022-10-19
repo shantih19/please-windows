@@ -1,38 +1,171 @@
+<h1 class="title-1">Please cache</h1>
 
-    <h1>Please cache</h1>
+<p>
+  In various places in these docs you might find reference to caches. Please can
+  make use of several caches to speed up its performance which are described
+  here.
+</p>
 
-    <p>In various places in these docs you might find reference to caches.
-      Please can make use of several caches to speed up its performance which are described here.</p>
+<p>
+  Not that caches are different from the output in
+  <code class="code">plz-out</code>. Even without caching, please will still
+  reuse built artifacts from <code class="code">plz-out</code> for incremental
+  builds. Please has strict caching and incrementality behavior. With that said,
+  you can still force a rebuild or a test rerun, use the
+  <code class="code">--rebuild</code> and
+  <code class="code">--rerun</code> flags respectively.
+</p>
 
-    <p>In all cases artifacts are only stored in the cache after a successful build or test run.<br/>
-      Please takes a <code>--nocache</code> flag which disables all caches for an individual run.</p>
+<p>
+  In all cases artifacts are only stored in the cache after a successful build
+  or test run.
+</p>
 
-    <h2>The directory cache</h2>
+<section class="mt4">
+  <h2 class="title-2">The directory cache</h2>
 
-    <p>This is the simplest kind of cache; it's on by default and simply is a directory tree
-      (by default <code>~/.cache/please</code> or <code>~/Library/Caches/please</code>)
-      containing various versions of built artifacts. The main advantage of this is that it allows
-      extremely fast rebuilds when swapping between different versions of code
-      (notably git branches).</p>
+  <p>
+    This is the simplest kind of cache; it's on by default and simply is a
+    directory tree (by default <code class="code">~/.cache/please</code> or
+    <code class="code">~/Library/Caches/please</code>) containing various
+    versions of built artifacts. The main advantage of this is that it allows
+    extremely fast rebuilds when swapping between different versions of code
+    (notably git branches).
+  </p>
 
-    <p>Note that the dir cache is <b>not</b> threadsafe or locked in any way beyond plz's normal
-      repo lock, so sharing the same directory between multiple projects is probably a Bad Idea.</p>
+  <p>
+    Note that the dir cache is <b>not</b> threadsafe or locked in any way beyond
+    plz's normal repo lock, so sharing the same directory between multiple
+    projects is probably a Bad Idea.
+  </p>
+</section>
 
-    <h2>The HTTP cache</h2>
+<section class="mt4">
+  <h2 class="title-2">The HTTP cache</h2>
 
-    <p>This is a more advanced cache which, as one would expect, can run on a centralised machine
-      to share artifacts between multiple clients. It has a simple API based on PUT and GET to
-      store and retrieve opaque blobs.</p>
+  <p>
+    This is a more advanced cache which, as one would expect, can run on a
+    centralised machine to share artifacts between multiple clients. It has a
+    simple API based on PUT and GET to store and retrieve opaque blobs.
+  </p>
 
-    <p>It is simply configured by setting the <code>httpurl</code> property in the
-      <a href="config.html#cache">cache section of the config</a>. There are a couple more settings
-      to configure it for readonly mode and to set timeouts etc.</p>
+  <p>
+    It is simply configured by setting the
+    <code class="code">httpurl</code> property in the
+    <a class="copy-link" href="/config.html#cache"
+      >cache section of the config</a
+    >. There are a couple more settings to configure it for readonly mode and to
+    set timeouts etc.
+  </p>
 
-    <p>Since the API is simple there are many existing servers that can be configured for a
-      backend; one option is nginx using its
-      <a href="http://nginx.org/en/docs/http/ngx_http_dav_module.html">webDAV</a> module.<br/>
-      Alternatively some CI services (for example <a href="https://cirrus-ci.org">Cirrus</a>)
-      may offer a compatible cache out of the box.</p>
+  <p>
+    Since the API is simple there are many existing servers that can be
+    configured for a backend; one option is nginx using its
+    <a
+      class="copy-link"
+      href="http://nginx.org/en/docs/http/ngx_http_dav_module.html"
+      target="_blank"
+      rel="noopener"
+      >webDAV</a
+    >
+    module.<br />
+    Alternatively some CI services (for example
+    <a
+      class="copy-link"
+      href="https://cirrus-ci.org"
+      target="_blank"
+      rel="noopener"
+      >Cirrus</a
+    >) may offer a compatible cache out of the box.
+  </p>
 
-    <p>Thanks to Diana Costea who implemented the original version of this as part of her internship
-      with us, and prodded us into getting on and actually deploying it for our CI servers.</p>
+  <p>
+    Thanks to Diana Costea who implemented the original version of this as part
+    of her internship with us, and prodded us into getting on and actually
+    deploying it for our CI servers.
+  </p>
+
+  <p>
+    A reference implementation of the http cache can be found
+    <a
+      class="copy-link"
+      href="https://github.com/thought-machine/please/tree/master/tools/http_cache"
+      target="_blank"
+      rel="noopener"
+      >here</a
+    >
+    however it should be possible to use any off the shelf http server with a
+    little configuration, as described above.
+  </p>
+</section>
+
+<section class="mt4">
+  <h2 class="title-2">Scriptable, command driven, cache</h2>
+
+  <p>
+    You can realize a centralised cache also by managing the remote access
+    part in external commands or scripts. Please will simply invoke the 
+    configured command whenever it wants to store or retrieve artifacts.
+    A good use case is AWS S3 access by simply using the aws-cli.
+    Lite weight generic S3 support (Minio/GCS/Backblaze etc.) could be added
+    by running e.g. MinIO mc client or similar tools.
+  </p>
+
+  <p>
+    It's somewhat slower compared to the http cache because it must spawn
+    external commands. Benefit is that you don't need to run and maintain 
+    a proxy between Please and your storage provider. 
+  </p>
+
+  <p>
+    Enable read access by setting the
+    <code class="code">RetrieveCommand</code> property in the
+    <a class="copy-link" href="/config.html#cache"
+      >cache section of the config</a
+    >. 
+    The configured command must be able to stream a tar file to stdout.
+    Please sets the environment variable <code class="code">CACHE_KEY</code> 
+    to the cache entries filename.
+  </p>
+  
+  <pre class="code-container">
+    <!-- prettier-ignore -->
+    <code data-lang="plz">
+    [Cache]
+    # stream from s3 object to stdout:
+    RetrieveCommand="aws s3 cp s3://YOUR-OWN-CACHE-BUCKET/please/$CACHE_KEY -"
+    </code>
+  </pre>
+
+  <p>
+    Write access is controlled by the
+    <code class="code">StoreCommand</code> property.
+    Keep it empty if you only want to have read-only access.
+    The configured command must be able to read a tar file from stdin.
+    Use the environment variable <code class="code">CACHE_KEY</code> 
+    as a part of the filename so that Please can retrieve the 
+    artifact by using the same key later.
+  </p>
+
+  <pre class="code-container">
+    <!-- prettier-ignore -->
+    <code data-lang="plz">
+    [Cache]
+    # stream stdin into a s3 object:
+    StoreCommand="aws s3 cp - s3://YOUR-OWN-CACHE-BUCKET/please/$CACHE_KEY"
+    </code>
+  </pre>
+
+  <p>
+    Mind that you can configure read-only access but not write-only as
+    RetrieveCommand is mandatory to enable custom cache support.
+  </p>
+
+  <p>
+    Raising the verbosity to <code class="code">debug</code> level will
+    help you to debug your script or command. Please logs each store/retrieve
+    operation to the custom cache and your scripts stderr will be shown as well.
+  </p>
+
+
+</section>

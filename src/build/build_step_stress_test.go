@@ -9,13 +9,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"gopkg.in/op/go-logging.v1"
 
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/plz"
 )
 
-var log = logging.MustGetLogger("build_test")
+var log = logging.Log
 
 const size = 1000
 
@@ -34,7 +34,7 @@ func TestBuildLotsOfTargets(t *testing.T) {
 	for i := 1; i <= size; i++ {
 		addTarget(state, i)
 	}
-	state.TaskDone(true) // Initial target adding counts as one.
+	state.TaskDone() // Initial target adding counts as one.
 
 	results := state.Results()
 	// Consume and discard any results
@@ -53,10 +53,11 @@ func addTarget(state *core.BuildState, i int) *core.BuildTarget {
 	target := core.NewBuildTarget(label(i))
 	target.IsFilegroup = true // Will mean it doesn't have to shell out to anything.
 	target.SetState(core.Active)
+	target.Test = new(core.TestFields)
 	state.Graph.AddTarget(target)
 	if i <= size {
 		if i > 10 {
-			target.Flakiness = i // Stash this here, will be useful later.
+			target.Test.Flakiness = uint8(i) // Stash this here, will be useful later.
 			state.Parser.(*fakeParser).PostBuildFunctions[target] = postBuild
 		}
 		if i < size/10 {
@@ -64,14 +65,12 @@ func addTarget(state *core.BuildState, i int) *core.BuildTarget {
 				dep := label(i*10 + j)
 				log.Info("Adding dependency %s -> %s", target.Label, dep)
 				target.AddDependency(dep)
-				state.Graph.AddDependency(target.Label, dep)
 			}
 		} else {
 			// These are buildable now
-			state.AddPendingBuild(target.Label, false)
+			state.QueueTarget(target.Label, core.OriginalTarget, false)
 		}
 	}
-	state.AddActiveTarget()
 	return target
 }
 
@@ -82,15 +81,15 @@ func label(i int) core.BuildLabel {
 // Post-build function that adds new targets & ties in dependencies.
 func postBuild(target *core.BuildTarget, out string) error {
 	// Add a target corresponding to this one to its 'parent'
-	if target.Flakiness == 0 {
+	if target.Test.Flakiness == 0 {
 		return fmt.Errorf("shouldn't be calling a post-build function on %s", target.Label)
 	}
-	parent := label(target.Flakiness / 10)
-	newTarget := addTarget(state, target.Flakiness+size)
+	parent := label(int(target.Test.Flakiness / 10))
+	newTarget := addTarget(state, int(target.Test.Flakiness)+size)
 
 	// This mimics what interpreter.go does.
-	state.Graph.TargetOrDie(parent).AddDependency(newTarget.Label)
-	state.Graph.AddDependency(parent, newTarget.Label)
+	t := state.Graph.TargetOrDie(parent)
+	t.AddDependency(newTarget.Label)
 	return nil
 }
 
@@ -100,21 +99,44 @@ type fakeParser struct {
 	PostBuildFunctions buildFunctionMap
 }
 
-func (fake *fakeParser) ParseFile(state *core.BuildState, pkg *core.Package, filename string) error {
+// ParseFile stub
+func (fake *fakeParser) ParseFile(pkg *core.Package, filename string) error {
 	return nil
 }
 
-func (fake *fakeParser) ParseReader(state *core.BuildState, pkg *core.Package, r io.ReadSeeker) error {
+func (fake *fakeParser) WaitForInit() {
+
+}
+
+// PreloadSubinclude stub
+func (fake *fakeParser) NewParser(state *core.BuildState) {
+
+}
+
+// Init stub
+func (fake *fakeParser) Init(state *core.BuildState) {
+
+}
+
+// ParseReader stub
+func (fake *fakeParser) ParseReader(pkg *core.Package, r io.ReadSeeker) error {
 	return nil
 }
 
+// RunPreBuildFunction stub
 func (fake *fakeParser) RunPreBuildFunction(threadID int, state *core.BuildState, target *core.BuildTarget) error {
 	return nil
 }
 
+// RunPostBuildFunction stub
 func (fake *fakeParser) RunPostBuildFunction(threadID int, state *core.BuildState, target *core.BuildTarget, output string) error {
 	if f, present := fake.PostBuildFunctions[target]; present {
 		return f(target, output)
 	}
 	return nil
+}
+
+// BuildRuleArgOrder stub
+func (fake *fakeParser) BuildRuleArgOrder() map[string]int {
+	return map[string]int{}
 }

@@ -2,9 +2,10 @@ package query
 
 import (
 	"fmt"
-	"github.com/thought-machine/please/src/core"
 	"sort"
 	"strings"
+
+	"github.com/thought-machine/please/src/core"
 )
 
 // Roots returns build labels with no dependents from the given list.
@@ -14,6 +15,7 @@ import (
 // shrinking set of labels.
 func Roots(graph *core.BuildGraph, labels core.BuildLabels, showHidden bool) {
 	// allSeenTargets is every single reverse dependency of the passed in labels.
+	revdeps := buildRevdeps(graph)
 	allSeenTargets := map[*core.BuildTarget]struct{}{}
 	for _, label := range labels {
 		target := graph.TargetOrDie(label)
@@ -25,7 +27,7 @@ func Roots(graph *core.BuildGraph, labels core.BuildLabels, showHidden bool) {
 		}
 
 		targets := map[*core.BuildTarget]struct{}{}
-		uniqueReverseDependencies(graph, target, targets)
+		uniqueReverseDependencies(revdeps, target, targets)
 		// We need to remove the current target from the returned list as it is a false positive at this point.
 		delete(targets, target)
 		for parent := range targets {
@@ -59,14 +61,13 @@ func indexOf(labels []core.BuildLabel, label core.BuildLabel) int {
 	return -1
 }
 
-func uniqueReverseDependencies(graph *core.BuildGraph, target *core.BuildTarget, targets map[*core.BuildTarget]struct{}) {
-	_, ok := targets[target]
-	if ok {
+func uniqueReverseDependencies(revdeps map[core.BuildLabel][]*core.BuildTarget, target *core.BuildTarget, targets map[*core.BuildTarget]struct{}) {
+	if _, ok := targets[target]; ok {
 		return
 	}
 	targets[target] = struct{}{}
 	// ReverseDependencies are the smaller order collection, so more efficient to iterate.
-	for _, child := range graph.ReverseDependencies(target) {
-		uniqueReverseDependencies(graph, child, targets)
+	for _, child := range revdeps[target.Label] {
+		uniqueReverseDependencies(revdeps, child, targets)
 	}
 }

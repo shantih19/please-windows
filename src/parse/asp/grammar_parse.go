@@ -2,7 +2,6 @@ package asp
 
 import (
 	"io"
-	"reflect"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -171,9 +170,10 @@ func (p *parser) parseStatement() *Statement {
 		s.Raise = p.parseExpression()
 		p.next(EOL)
 	case "assert":
-		p.initField(&s.Assert)
 		p.l.Next()
-		s.Assert.Expr = p.parseExpression()
+		s.Assert = &AssertStatement{
+			Expr: p.parseExpression(),
+		}
 		if p.optional(',') {
 			s.Assert.Message = p.parseExpression()
 			p.endPos = s.Assert.Message.EndPos
@@ -291,7 +291,7 @@ func (p *parser) parseArgument() Argument {
 		if tok := p.l.Peek(); tok.Type == ',' || tok.Type == ')' {
 			return a
 		}
-		tok = p.next('=')
+		p.next('=')
 	}
 	// Default value
 	a.Value = p.parseExpression()
@@ -307,11 +307,12 @@ func (p *parser) parseIf() *IfStatement {
 	i.Statements = p.parseStatements()
 
 	for p.optionalv("elif") {
-		elif := &i.Elif[p.newElement(&i.Elif)]
+		elif := IfStatementElif{}
 		p.parseExpressionInPlace(&elif.Condition)
 		p.next(':')
 		p.next(EOL)
 		elif.Statements = p.parseStatements()
+		i.Elif = append(i.Elif, elif)
 	}
 	if p.optionalv("else") {
 		p.next(':')
@@ -320,20 +321,6 @@ func (p *parser) parseIf() *IfStatement {
 	}
 
 	return i
-}
-
-// newElement is a nasty little hack to allow extending slices of types that we can't readily name.
-// This is added in preference to having to break everything out to separately named types.
-func (p *parser) newElement(x interface{}) int {
-	v := reflect.ValueOf(x).Elem()
-	v.Set(reflect.Append(v, reflect.Zero(v.Type().Elem())))
-	return v.Len() - 1
-}
-
-// initField is a similar little hack for initialising non-slice fields.
-func (p *parser) initField(x interface{}) {
-	v := reflect.ValueOf(x).Elem()
-	v.Set(reflect.New(v.Type().Elem()))
 }
 
 func (p *parser) parseFor() *ForStatement {
@@ -407,9 +394,8 @@ func (p *parser) parseUnconditionalExpressionInPlace(e *Expression) {
 		p.endPos = tok.EndPos()
 	}
 	if op, present := operators[tok.Value]; present {
-		tok = p.l.Next()
-		o := &e.Op[p.newElement(&e.Op)]
-		o.Op = op
+		p.l.Next()
+		o := OpExpression{Op: op}
 		if op == Is {
 			if tok := p.l.Peek(); tok.Value == "not" {
 				// Mild hack for "is not" which needs to become a single operator.
@@ -419,6 +405,7 @@ func (p *parser) parseUnconditionalExpressionInPlace(e *Expression) {
 			}
 		}
 		o.Expr = p.parseUnconditionalExpression()
+		e.Op = append(e.Op, o)
 		if len(o.Expr.Op) > 0 {
 			if op := o.Expr.Op[0].Op; op == And || op == Or || op == Is {
 				// Hoist logical operator back up here to fix precedence. This is a bit of a hack and
@@ -428,6 +415,39 @@ func (p *parser) parseUnconditionalExpressionInPlace(e *Expression) {
 			}
 		}
 	}
+}
+
+func concatStrings(lhs *ValueExpression, rhs *ValueExpression) *ValueExpression {
+	// If they're both fStrngs
+	if lhs.FString != nil && rhs.FString != nil {
+		// If rhs has no variables, handle that
+		if len(rhs.FString.Vars) == 0 {
+			lhs.FString.Suffix += rhs.FString.Suffix
+			return lhs
+		}
+
+		// Otherwise merge the vars
+		rhs.FString.Vars[0].Prefix = lhs.FString.Suffix + rhs.FString.Vars[0].Prefix
+		rhs.FString.Vars = append(lhs.FString.Vars, rhs.FString.Vars...)
+
+		return rhs
+	}
+
+	// lhs is fString, add rhs to suffix
+	if lhs.FString != nil && rhs.FString == nil {
+		lhs.FString.Suffix += rhs.String[1 : len(rhs.String)-1]
+		return lhs
+	}
+
+	// lhs is string, add rhs to prefix of first var
+	if lhs.FString == nil && rhs.FString != nil {
+		rhs.FString.Vars[0].Prefix = lhs.String[1:len(lhs.String)-1] + rhs.FString.Vars[0].Prefix
+		return rhs
+	}
+
+	// otherwise they must both be strings
+	lhs.String = "\"" + lhs.String[1:len(lhs.String)-1] + rhs.String[1:len(rhs.String)-1] + "\""
+	return lhs
 }
 
 func (p *parser) parseValueExpression() *ValueExpression {
@@ -441,15 +461,25 @@ func (p *parser) parseValueExpression() *ValueExpression {
 			ve.String = tok.Value
 			p.endPos = p.l.Next().EndPos()
 		}
+
+		if p.l.Peek().Type == String {
+			return concatStrings(ve, p.parseValueExpression())
+		}
 	} else if tok.Type == Int {
 		p.assert(len(tok.Value) < 19, tok, "int literal is too large: %s", tok)
-		p.initField(&ve.Int)
 		i, err := strconv.Atoi(tok.Value)
 		p.assert(err == nil, tok, "invalid int value %s", tok) // Theoretically the lexer shouldn't have fed us this...
-		ve.Int.Int = i
+		ve.Int = i
+		ve.IsInt = true
 		p.endPos = p.l.Next().EndPos()
-	} else if tok.Value == "False" || tok.Value == "True" || tok.Value == "None" {
-		ve.Bool = tok.Value
+	} else if tok.Value == "False" {
+		ve.False = true // hmmm...
+		p.endPos = p.l.Next().EndPos()
+	} else if tok.Value == "True" {
+		ve.True = true
+		p.endPos = p.l.Next().EndPos()
+	} else if tok.Value == "None" {
+		ve.None = true
 		p.endPos = p.l.Next().EndPos()
 	} else if tok.Type == '[' {
 		ve.List = p.parseList('[', ']')
@@ -493,13 +523,15 @@ func (p *parser) parseIdentStatement() *IdentStatement {
 	tok = p.l.Next()
 	switch tok.Type {
 	case ',':
-		p.initField(&i.Unpack)
-		i.Unpack.Names = p.parseIdentList()
+		i.Unpack = &IdentStatementUnpack{
+			Names: p.parseIdentList(),
+		}
 		p.next('=')
 		i.Unpack.Expr = p.parseExpression()
 	case '[':
-		p.initField(&i.Index)
-		i.Index.Expr = p.parseExpression()
+		i.Index = &IdentStatementIndex{
+			Expr: p.parseExpression(),
+		}
 		p.endPos = p.next(']').EndPos()
 		if tok := p.oneofval("=", "+="); tok.Type == '=' {
 			i.Index.Assign = p.parseExpression()
@@ -507,25 +539,28 @@ func (p *parser) parseIdentStatement() *IdentStatement {
 			i.Index.AugAssign = p.parseExpression()
 		}
 	case '.':
-		p.initField(&i.Action)
-		i.Action.Property = p.parseIdentExpr()
+		i.Action = &IdentStatementAction{
+			Property: p.parseIdentExpr(),
+		}
 		p.endPos = i.Action.Property.EndPos
 	case '(':
-		p.initField(&i.Action)
-		i.Action.Call = p.parseCall()
+		i.Action = &IdentStatementAction{
+			Call: p.parseCall(),
+		}
 	case '=':
-		p.initField(&i.Action)
-		i.Action.Assign = p.parseExpression()
+		i.Action = &IdentStatementAction{
+			Assign: p.parseExpression(),
+		}
 	default:
 		p.assert(tok.Value == "+=", tok, "Unexpected token %s, expected one of , [ . ( = +=", tok)
-		p.initField(&i.Action)
-		i.Action.AugAssign = p.parseExpression()
+		i.Action = &IdentStatementAction{
+			AugAssign: p.parseExpression(),
+		}
 	}
 	return i
 }
 
 func (p *parser) parseIdentExpr() *IdentExpr {
-	//var endPos Position
 	identTok := p.next(Ident)
 	ie := &IdentExpr{
 		Name: identTok.Value,
@@ -533,7 +568,7 @@ func (p *parser) parseIdentExpr() *IdentExpr {
 	}
 	for tok := p.l.Peek(); tok.Type == '.' || tok.Type == '('; tok = p.l.Peek() {
 		tok := p.l.Next()
-		action := &ie.Action[p.newElement(&ie.Action)]
+		action := IdentExprAction{}
 		if tok.Type == '.' {
 			action.Property = p.parseIdentExpr()
 			ie.EndPos = action.Property.EndPos
@@ -541,6 +576,7 @@ func (p *parser) parseIdentExpr() *IdentExpr {
 			action.Call = p.parseCall()
 			ie.EndPos = p.endPos
 		}
+		ie.Action = append(ie.Action, action)
 	}
 	// In case the Ident is a variable name, we assign the endPos to the end of current token.
 	// see test_data/unary_op.build
@@ -640,8 +676,9 @@ func (p *parser) parseComprehension() *Comprehension {
 	p.nextv("in")
 	c.Expr = p.parseUnconditionalExpression()
 	if p.optionalv("for") {
-		p.initField(&c.Second)
-		c.Second.Names = p.parseIdentList()
+		c.Second = &SecondComprehension{
+			Names: p.parseIdentList(),
+		}
 		p.nextv("in")
 		c.Second.Expr = p.parseUnconditionalExpression()
 	}
@@ -677,21 +714,19 @@ func (p *parser) parseFString() *FString {
 	p.endPos = tok.EndPos()
 	tok.Pos.Column++ // track position in case of error
 	for idx := p.findBrace(s); idx != -1; idx = p.findBrace(s) {
-		v := &f.Vars[p.newElement(&f.Vars)]
-		v.Prefix = strings.Replace(strings.Replace(s[:idx], "{{", "{", -1), "}}", "}", -1)
+		v := FStringVar{
+			Prefix: strings.ReplaceAll(strings.ReplaceAll(s[:idx], "{{", "{"), "}}", "}"),
+		}
 		s = s[idx+1:]
 		tok.Pos.Column += idx + 1
 		idx = strings.IndexByte(s, '}')
 		p.assert(idx != -1, tok, "Unterminated brace in fstring")
-		if varname := s[:idx]; strings.HasPrefix(varname, "CONFIG.") {
-			v.Config = strings.TrimPrefix(varname, "CONFIG.")
-		} else {
-			v.Var = varname
-		}
+		v.Var = strings.Split(s[:idx], ".")
+		f.Vars = append(f.Vars, v)
 		s = s[idx+1:]
 		tok.Pos.Column += idx + 1
 	}
-	f.Suffix = strings.Replace(strings.Replace(s, "{{", "{", -1), "}}", "}", -1)
+	f.Suffix = strings.ReplaceAll(strings.ReplaceAll(s, "{{", "{"), "}}", "}")
 
 	return f
 }
@@ -700,7 +735,7 @@ func (p *parser) findBrace(s string) int {
 	last := ' '
 	for i, c := range s {
 		if c == '{' && last != '{' && last != '$' {
-			if i < len(s) && s[i+1] == '{' {
+			if i+1 < len(s) && s[i+1] == '{' {
 				last = c
 				continue
 			}

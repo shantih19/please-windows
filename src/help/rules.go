@@ -2,21 +2,19 @@ package help
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"path"
 	"regexp"
 	"sort"
 	"strings"
 
-	"gopkg.in/op/go-logging.v1"
-
 	"github.com/thought-machine/please/rules"
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/parse/asp"
 )
 
-var log = logging.MustGetLogger("help")
+var log = logging.Log
 
 // PrintRuleArgs prints the arguments of all builtin rules
 func PrintRuleArgs() {
@@ -44,11 +42,15 @@ func newState() *core.BuildState {
 func AllBuiltinFunctions(state *core.BuildState) map[string]*asp.Statement {
 	p := asp.NewParser(state)
 	m := map[string]*asp.Statement{}
-	dir, _ := rules.AssetDir("")
+	dir, _ := rules.AllAssets(state.ExcludedBuiltinRules())
 	sort.Strings(dir)
 	for _, filename := range dir {
-		if !strings.HasSuffix(filename, ".gob") && filename != "builtins.build_defs" {
-			if stmts, err := p.ParseData(rules.MustAsset(filename), filename); err == nil {
+		if filename != "builtins.build_defs" {
+			assetSrc, err := rules.ReadAsset(filename)
+			if err != nil {
+				log.Fatalf("Failed to read an asset %s", filename)
+			}
+			if stmts, err := p.ParseData(assetSrc, filename); err == nil {
 				addAllFunctions(m, stmts, true)
 			}
 		}
@@ -59,7 +61,7 @@ func AllBuiltinFunctions(state *core.BuildState) map[string]*asp.Statement {
 		}
 	}
 	for _, dir := range state.Config.Parse.BuildDefsDir {
-		if files, err := ioutil.ReadDir(dir); err == nil {
+		if files, err := os.ReadDir(dir); err == nil {
 			for _, file := range files {
 				if !file.IsDir() {
 					if stmts, err := p.ParseFileOnly(path.Join(dir, file.Name())); err == nil {
@@ -78,6 +80,13 @@ func addAllFunctions(m map[string]*asp.Statement, stmts []*asp.Statement, builti
 		if f := stmt.FuncDef; f != nil && !f.IsPrivate && f.Docstring != "" {
 			f.Docstring = strings.TrimSpace(strings.Trim(f.Docstring, `"`))
 			f.IsBuiltin = builtin
+			args := make([]asp.Argument, 0, len(f.Arguments))
+			for _, arg := range f.Arguments {
+				if !arg.IsPrivate {
+					args = append(args, arg)
+				}
+			}
+			f.Arguments = args
 			m[f.Name] = stmt
 		}
 	}
@@ -128,8 +137,8 @@ type function struct {
 // A functionArg represents a single argument to a function.
 type functionArg struct {
 	Comment    string   `json:"comment,omitempty"`
-	Deprecated bool     `json:"deprecated,omitempty"`
 	Name       string   `json:"name"`
+	Deprecated bool     `json:"deprecated,omitempty"`
 	Required   bool     `json:"required,omitempty"`
 	Types      []string `json:"types"`
 }

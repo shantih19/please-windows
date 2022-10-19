@@ -57,23 +57,24 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime/debug"
 	"strings"
+
+	"github.com/peterebden/go-deferred-regex"
 
 	"github.com/thought-machine/please/src/fs"
 )
 
-var locationReplacement = regexp.MustCompile(`\$\(location ([^\)]+)\)`)
-var locationsReplacement = regexp.MustCompile(`\$\(locations ([^\)]+)\)`)
-var exeReplacement = regexp.MustCompile(`\$\(exe ([^\)]+)\)`)
-var outExeReplacement = regexp.MustCompile(`\$\(out_exe ([^\)]+)\)`)
-var outReplacement = regexp.MustCompile(`\$\(out_location ([^\)]+)\)`)
-var outsReplacement = regexp.MustCompile(`\$\(out_locations ([^\)]+)\)`)
-var dirReplacement = regexp.MustCompile(`\$\(dir ([^\)]+)\)`)
-var outDirReplacement = regexp.MustCompile(`\$\(out_dir ([^\)]+)\)`)
-var hashReplacement = regexp.MustCompile(`\$\(hash ([^\)]+)\)`)
-var workerReplacement = regexp.MustCompile(`^(.*)\$\(worker ([^\)]+)\) *([^&]*)(?: *&& *(.*))?$`)
+var locationReplacement = deferredregex.DeferredRegex{Re: `\$\(location ([^\)]+)\)`}
+var locationsReplacement = deferredregex.DeferredRegex{Re: `\$\(locations ([^\)]+)\)`}
+var exeReplacement = deferredregex.DeferredRegex{Re: `\$\(exe ([^\)]+)\)`}
+var outExeReplacement = deferredregex.DeferredRegex{Re: `\$\(out_exe ([^\)]+)\)`}
+var outReplacement = deferredregex.DeferredRegex{Re: `\$\(out_location ([^\)]+)\)`}
+var outsReplacement = deferredregex.DeferredRegex{Re: `\$\(out_locations ([^\)]+)\)`}
+var dirReplacement = deferredregex.DeferredRegex{Re: `\$\(dir ([^\)]+)\)`}
+var outDirReplacement = deferredregex.DeferredRegex{Re: `\$\(out_dir ([^\)]+)\)`}
+var hashReplacement = deferredregex.DeferredRegex{Re: `\$\(hash ([^\)]+)\)`}
+var workerReplacement = deferredregex.DeferredRegex{Re: `^(.*)\$\(worker ([^\)]+)\) *([^&]*)(?: *&& *(.*))?$`}
 
 // ReplaceSequences replaces escape sequences in the given string.
 func ReplaceSequences(state *BuildState, target *BuildTarget, command string) (string, error) {
@@ -156,40 +157,49 @@ func replaceSequencesInternal(state *BuildState, target *BuildTarget, command st
 	if state.Config.Bazel.Compatibility {
 		// Bazel allows several obscure Make-style variable expansions.
 		// Our replacement here is not very principled but should work better than not doing it at all.
-		cmd = strings.Replace(cmd, "$<", "$SRCS", -1)
-		cmd = strings.Replace(cmd, "$(<)", "$SRCS", -1)
-		cmd = strings.Replace(cmd, "$@D", "$TMP_DIR", -1)
-		cmd = strings.Replace(cmd, "$(@D)", "$TMP_DIR", -1)
-		cmd = strings.Replace(cmd, "$@", "$OUTS", -1)
-		cmd = strings.Replace(cmd, "$(@)", "$OUTS", -1)
+		cmd = strings.ReplaceAll(cmd, "$<", "$SRCS")
+		cmd = strings.ReplaceAll(cmd, "$(<)", "$SRCS")
+		cmd = strings.ReplaceAll(cmd, "$@D", "$TMP_DIR")
+		cmd = strings.ReplaceAll(cmd, "$(@D)", "$TMP_DIR")
+		cmd = strings.ReplaceAll(cmd, "$@", "$OUTS")
+		cmd = strings.ReplaceAll(cmd, "$(@)", "$OUTS")
 		// It also seemingly allows you to get away with this syntax, which means something
 		// fairly different in Bash, but never mind.
-		cmd = strings.Replace(cmd, "$(SRCS)", "$SRCS", -1)
-		cmd = strings.Replace(cmd, "$(OUTS)", "$OUTS", -1)
+		cmd = strings.ReplaceAll(cmd, "$(SRCS)", "$SRCS")
+		cmd = strings.ReplaceAll(cmd, "$(OUTS)", "$OUTS")
 	}
 	// We would ideally check for this when doing matches above, but not easy in
 	// Go since its regular expressions are actually regular and principled.
-	return strings.Replace(cmd, "\\$", "$", -1), nil
+	return strings.ReplaceAll(cmd, "\\$", "$"), nil
+}
+
+func splitEntryPoint(label string) (string, string) {
+	if strings.Contains(label, "|") {
+		parts := strings.Split(label, "|")
+		return parts[0], parts[1]
+	}
+	return label, ""
 }
 
 // replaceSequence replaces a single escape sequence in a command.
 func replaceSequence(state *BuildState, target *BuildTarget, in string, runnable, multiple, dir, outPrefix, hash, test bool) string {
 	if LooksLikeABuildLabel(in) {
+		in, ep := splitEntryPoint(in)
 		label, err := TryParseBuildLabel(in, target.Label.PackageName, target.Label.Subrepo)
 		if err != nil {
 			panic(err)
 		}
-		return replaceSequenceLabel(state, target, label, in, runnable, multiple, dir, outPrefix, hash, test, true)
+		return replaceSequenceLabel(state, target, label, ep, in, runnable, multiple, dir, outPrefix, hash, test, true)
 	}
 	for _, src := range sourcesOrTools(target, runnable) {
-		if label := src.Label(); label != nil && src.String() == in {
-			return replaceSequenceLabel(state, target, *label, in, runnable, multiple, dir, outPrefix, hash, test, false)
+		if label, ok := src.Label(); ok && src.String() == in {
+			return replaceSequenceLabel(state, target, label, "", in, runnable, multiple, dir, outPrefix, hash, test, false)
 		} else if runnable && src.String() == in {
 			return src.String()
 		}
 	}
 	if hash {
-		return base64.RawURLEncoding.EncodeToString(state.PathHasher.MustHash(path.Join(target.Label.PackageName, in)))
+		return base64.RawURLEncoding.EncodeToString(state.PathHasher.MustHash(path.Join(target.Label.PackageName, in), target.HashLastModified()))
 	}
 	if strings.HasPrefix(in, "/") {
 		return in // Absolute path, probably on a tool or system src.
@@ -214,22 +224,24 @@ func sourcesOrTools(target *BuildTarget, runnable bool) []BuildInput {
 	return target.AllSources()
 }
 
-func replaceSequenceLabel(state *BuildState, target *BuildTarget, label BuildLabel, in string, runnable, multiple, dir, outPrefix, hash, test, allOutputs bool) string {
+func replaceSequenceLabel(state *BuildState, target *BuildTarget, label BuildLabel, ep string, in string, runnable, multiple, dir, outPrefix, hash, test, allOutputs bool) string {
 	// Check this label is a dependency of the target, otherwise it's not allowed.
 	if label == target.Label { // targets can always use themselves.
-		return checkAndReplaceSequence(state, target, target, in, runnable, multiple, dir, outPrefix, hash, test, allOutputs, false)
+		return checkAndReplaceSequence(state, target, target, ep, in, runnable, multiple, dir, outPrefix, hash, test, allOutputs, false)
 	}
+	// TODO(jpoole): This doesn't handle tools when cross compiling. ///freebsd_amd64//tools:tool
+	// will not match the tool //tools:tool
 	deps := target.DependenciesFor(label)
 	if len(deps) == 0 {
 		panic(fmt.Sprintf("Rule %s can't use %s; doesn't depend on target %s", target.Label, in, label))
 	}
 	// TODO(pebers): this does not correctly handle the case where there are multiple deps here
 	//               (but is better than the previous case where it never worked at all)
-	return checkAndReplaceSequence(state, target, deps[0], in, runnable, multiple, dir, outPrefix, hash, test, allOutputs, target.IsTool(label))
+	return checkAndReplaceSequence(state, target, deps[0], ep, in, runnable, multiple, dir, outPrefix, hash, test, allOutputs, target.IsTool(label))
 }
 
-func checkAndReplaceSequence(state *BuildState, target, dep *BuildTarget, in string, runnable, multiple, dir, outPrefix, hash, test, allOutputs, tool bool) string {
-	if allOutputs && !multiple && len(dep.Outputs()) > 1 {
+func checkAndReplaceSequence(state *BuildState, target, dep *BuildTarget, ep, in string, runnable, multiple, dir, outPrefix, hash, test, allOutputs, tool bool) string {
+	if allOutputs && !multiple && len(dep.Outputs()) > 1 && ep == "" {
 		// Label must have only one output.
 		panic(fmt.Sprintf("Rule %s can't use %s; %s has multiple outputs.", target.Label, in, dep.Label))
 	} else if runnable && !dep.IsBinary {
@@ -247,27 +259,36 @@ func checkAndReplaceSequence(state *BuildState, target, dep *BuildTarget, in str
 		return base64.RawURLEncoding.EncodeToString(h)
 	}
 	output := ""
-	for _, out := range dep.Outputs() {
-		if allOutputs || out == in {
-			if tool && !state.WillRunRemotely(target) {
-				abs, err := filepath.Abs(handleDir(dep.OutDir(), out, dir))
-				if err != nil {
-					log.Fatalf("Couldn't calculate relative path: %s", err)
+	if ep == "" {
+		for _, out := range dep.Outputs() {
+			if allOutputs || out == in {
+				if tool && !state.WillRunRemotely(target) {
+					abs, err := filepath.Abs(handleDir(dep.OutDir(), out, dir))
+					if err != nil {
+						log.Fatalf("Couldn't calculate relative path: %s", err)
+					}
+					output += quote(abs) + " "
+				} else {
+					output += quote(fileDestination(target, dep, out, dir, outPrefix, test)) + " "
 				}
-				output += quote(abs) + " "
-			} else {
-				output += quote(fileDestination(target, dep, out, dir, outPrefix, test)) + " "
-			}
-			if dir {
-				break
+				if dir {
+					break
+				}
 			}
 		}
+		// TODO(jpoole): remove this once JavaBinaryExecutableByDefault has been merged
+		if runnable && dep.HasLabel("java_non_exe") && !state.Config.FeatureFlags.JavaBinaryExecutableByDefault {
+			// The target is a Java target that isn't self-executable, hence it needs something to run it.
+			output = "java -jar " + output
+		}
+	} else {
+		out, ok := dep.EntryPoints[ep]
+		if !ok {
+			log.Fatalf("%v has no entry point %s", dep, ep)
+		}
+		output = quote(fileDestination(target, dep, out, dir, outPrefix, test))
 	}
-	// TODO(jpoole): remove this once JavaBinaryExecutableByDefault has been merged
-	if runnable && dep.HasLabel("java_non_exe") && !state.Config.FeatureFlags.JavaBinaryExecutableByDefault {
-		// The target is a Java target that isn't self-executable, hence it needs something to run it.
-		output = "java -jar " + output
-	}
+
 	return strings.TrimRight(output, " ")
 }
 

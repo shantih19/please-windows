@@ -4,6 +4,7 @@
 package asp
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,7 +22,12 @@ func parseFileToStatementsInPkg(filename string, pkg *core.Package) (*scope, []*
 	state := core.NewDefaultBuildState()
 	state.Config.BuildConfig = map[string]string{"parser-engine": "python27"}
 	parser := NewParser(state)
-	parser.MustLoadBuiltins("builtins.build_defs", nil, rules.MustAsset("builtins.build_defs.gob"))
+
+	src, err := rules.ReadAsset("builtins.build_defs")
+	if err != nil {
+		panic(err)
+	}
+	parser.MustLoadBuiltins("builtins.build_defs", src)
 	statements, err := parser.parse(filename)
 	if err != nil {
 		panic(err)
@@ -68,6 +74,15 @@ func TestInterpreterInterpreterOperators(t *testing.T) {
 	i := s.Lookup("y").(pyInt)
 	assert.EqualValues(t, 7, i)
 	assert.True(t, s.Lookup("z").IsTruthy())
+}
+
+// Test that local is forced to be True if there are any system_srcs set
+func TestSetLocalTrueIfSystemSrcs(t *testing.T) {
+	s, err := parseFile("src/parse/asp/test_data/interpreter/system_srcs.build")
+	require.NoError(t, err)
+	assert.Equal(t, 2, s.pkg.NumTargets())
+	assert.Equal(t, s.pkg.Target("system_srcs_set").Local, true)
+	assert.Equal(t, s.pkg.Target("system_srcs_unset").Local, false)
 }
 
 func TestInterpreterInterpolation(t *testing.T) {
@@ -252,7 +267,11 @@ func TestInterpreterPartition(t *testing.T) {
 	s, err := parseFile("src/parse/asp/test_data/interpreter/partition.build")
 	assert.NoError(t, err)
 	assert.EqualValues(t, "27", s.Lookup("major"))
+	assert.EqualValues(t, ".0.", s.Lookup("mid"))
 	assert.EqualValues(t, "3", s.Lookup("minor"))
+	assert.EqualValues(t, "begin ", s.Lookup("start"))
+	assert.EqualValues(t, "sep", s.Lookup("sep"))
+	assert.EqualValues(t, " end", s.Lookup("end"))
 }
 
 func TestInterpreterFStrings(t *testing.T) {
@@ -261,13 +280,13 @@ func TestInterpreterFStrings(t *testing.T) {
 	assert.EqualValues(t, "a", s.Lookup("x"))
 	assert.EqualValues(t, "a", s.Lookup("y"))
 	assert.EqualValues(t, "x: a y: a fin", s.Lookup("z"))
+	assert.EqualValues(t, "6", s.Lookup("nest_test"))
 }
 
 func TestInterpreterSubincludeConfig(t *testing.T) {
 	s, err := parseFile("src/parse/asp/test_data/interpreter/partition.build")
 	assert.NoError(t, err)
-	pkg := core.NewPackage("test")
-	s.SetAll(s.interpreter.Subinclude("src/parse/asp/test_data/interpreter/subinclude_config.build", pkg.Label(), pkg), false)
+	s.SetAll(s.interpreter.Subinclude("src/parse/asp/test_data/interpreter/subinclude_config.build", core.NewPackage("test").Label()), false)
 	assert.EqualValues(t, "test test", s.config.Get("test", None))
 }
 
@@ -331,4 +350,117 @@ func TestSubrepoName(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.EqualValues(t, "pleasings", s.Lookup("subrepo"))
+}
+
+func TestMultiply(t *testing.T) {
+	s, err := parseFile("src/parse/asp/test_data/interpreter/multiply.build")
+	assert.NoError(t, err)
+	assert.EqualValues(t, 42, s.Lookup("i1"))
+	assert.EqualValues(t, 42, s.Lookup("i2"))
+	assert.EqualValues(t, "abcabcabc", s.Lookup("s1"))
+	assert.EqualValues(t, "abcabcabc", s.Lookup("s2"))
+	assert.EqualValues(t, pyList{pyString("a"), pyString("b"), pyString("a"), pyString("b")}, s.Lookup("l1"))
+	assert.EqualValues(t, pyList{pyString("a"), pyString("b"), pyString("a"), pyString("b")}, s.Lookup("l2"))
+}
+
+func TestDivide(t *testing.T) {
+	s, err := parseFile("src/parse/asp/test_data/interpreter/divide.build")
+	assert.NoError(t, err)
+	assert.EqualValues(t, 0, s.Lookup("i"))
+	assert.EqualValues(t, 7, s.Lookup("j"))
+	assert.EqualValues(t, -2, s.Lookup("k"))
+}
+
+func TestFStringOptimisation(t *testing.T) {
+	s, stmts, err := parseFileToStatements("src/parse/asp/test_data/interpreter/fstring_optimisation.build")
+	require.NoError(t, err)
+	assert.EqualValues(t, s.Lookup("x"), "test")
+	// Check that it's been optimised to something
+	assign := stmts[0].Ident.Action.Assign
+	assert.Nil(t, assign.Val)
+	assert.NotNil(t, assign.Optimised.Constant)
+	assert.EqualValues(t, "test", assign.Optimised.Constant)
+}
+
+func TestFormat(t *testing.T) {
+	s, err := parseFile("src/parse/asp/test_data/interpreter/format.build")
+	assert.NoError(t, err)
+	assert.EqualValues(t, `LLVM_NATIVE_ARCH=\"x86\"`, s.Lookup("arch"))
+	assert.EqualValues(t, `ARCH="linux_amd64"`, s.Lookup("arch2"))
+}
+
+func TestIsSemver(t *testing.T) {
+	t.Run("OK", func(t *testing.T) {
+		s, err := parseFile("src/parse/asp/test_data/interpreter/is_semver.build")
+		assert.NoError(t, err)
+		for i := 1; i <= 18; i++ {
+			assert.EqualValues(t, pyBool(true), s.Lookup(fmt.Sprintf("t%d", i)))
+		}
+		for i := 1; i <= 16; i++ {
+			assert.EqualValues(t, pyBool(false), s.Lookup(fmt.Sprintf("f%d", i)))
+		}
+	})
+}
+
+func TestJSON(t *testing.T) {
+	state := core.NewDefaultBuildState()
+	parser := NewParser(state)
+
+	src, err := rules.ReadAsset("builtins.build_defs")
+	if err != nil {
+		panic(err)
+	}
+	parser.MustLoadBuiltins("builtins.build_defs", src)
+	statements, err := parser.parse("src/parse/asp/test_data/json.build")
+	if err != nil {
+		panic(err)
+	}
+	statements = parser.optimise(statements)
+	parser.interpreter.optimiseExpressions(statements)
+
+	s := parser.interpreter.scope.NewScope()
+
+	list := pyList{pyString("foo"), pyInt(5)}
+	dict := pyDict{"foo": pyString("bar")}
+	confBase := &pyConfigBase{dict: dict}
+	config := &pyConfig{base: confBase, overlay: pyDict{"baz": pyInt(6)}}
+
+	s.locals["some_list"] = list
+	s.locals["some_frozen_list"] = list.Freeze()
+	s.locals["some_dict"] = dict
+	s.locals["some_frozen_dict"] = dict.Freeze()
+	s.locals["some_config"] = config
+	s.locals["some_frozen_config"] = config.Freeze()
+
+	s.interpretStatements(statements)
+
+	assert.Equal(t, "[\"foo\",5]", s.Lookup("json_list").String())
+	assert.Equal(t, "[\"foo\",5]", s.Lookup("json_frozen_list").String())
+	assert.Equal(t, "{\"foo\":\"bar\"}", s.Lookup("json_dict").String())
+	assert.Equal(t, "{\"foo\":\"bar\"}", s.Lookup("json_frozen_dict").String())
+	assert.Contains(t, s.Lookup("json_config").String(), "\"foo\":\"bar\"")
+	assert.Contains(t, s.Lookup("json_config").String(), "\"baz\":6")
+	assert.Contains(t, s.Lookup("json_frozen_config").String(), "\"foo\":\"bar\"")
+	assert.Contains(t, s.Lookup("json_frozen_config").String(), "\"baz\":6")
+}
+
+func TestSemverCheck(t *testing.T) {
+	t.Run("OK", func(t *testing.T) {
+		s, err := parseFile("src/parse/asp/test_data/interpreter/semver_check.build")
+		assert.NoError(t, err)
+		assert.EqualValues(t, pyBool(true), s.Lookup("c1"))
+		assert.EqualValues(t, pyBool(false), s.Lookup("c2"))
+		assert.EqualValues(t, pyBool(true), s.Lookup("c3"))
+		assert.EqualValues(t, pyBool(true), s.Lookup("c4"))
+	})
+
+	t.Run("InvalidVersion", func(t *testing.T) {
+		_, err := parseFile("src/parse/asp/test_data/interpreter/semver_check_invalid_version.build")
+		assert.Error(t, err)
+	})
+
+	t.Run("InvalidConstraint", func(t *testing.T) {
+		_, err := parseFile("src/parse/asp/test_data/interpreter/semver_check_invalid_constraint.build")
+		assert.Error(t, err)
+	})
 }

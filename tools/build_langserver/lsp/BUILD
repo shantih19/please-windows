@@ -15,6 +15,7 @@ go_library(
         "//third_party/go:jsonrpc2",
         "//third_party/go:logging",
         "//third_party/go:lsp",
+        "//tools/build_langserver/lsp/astutils",
     ],
 )
 
@@ -23,8 +24,7 @@ go_test(
     size = "medium",
     srcs = glob(["*_test.go"]),
     data = ["test_data"],
-    flaky = True,
-    labels = ["manual"] if CONFIG.OS == "freebsd" else [],
+    labels = ["manual"],  # TODO(#1412): find out why this flakes
     deps = [
         ":lsp",
         "//src/cli",

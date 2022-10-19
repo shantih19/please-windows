@@ -38,6 +38,16 @@ func TestOutDirSubrepo(t *testing.T) {
 	assert.Equal(t, "plz-out/bin/test_x86/mickey/donald", target.OutDir())
 }
 
+func TestExecDir(t *testing.T) {
+	target := makeTarget1("//mickey/donald:goofy", "")
+	assert.Equal(t, "plz-out/exec/mickey/donald/goofy", target.ExecDir())
+}
+
+func TestExecDirSubrepo(t *testing.T) {
+	target := makeTarget1("@test_x86//mickey/donald:goofy", "")
+	assert.Equal(t, "plz-out/exec/test_x86/mickey/donald/goofy", target.ExecDir())
+}
+
 func TestTestDirSubrepo(t *testing.T) {
 	target := makeTarget1("@test_x86//mickey/donald:goofy", "")
 	assert.Equal(t, "plz-out/tmp/test_x86/mickey/donald/goofy._test/run_1", target.TestDir(1))
@@ -99,7 +109,7 @@ func TestCheckDependencyVisibility(t *testing.T) {
 	target6 := makeTarget1("//src/test/python:test_lib", "", target5)
 	target6.TestOnly = true
 	target7 := makeTarget1("//src/test/python:test1", "", target5, target4)
-	target7.IsTest = true
+	target7.Test = new(TestFields)
 
 	state := NewDefaultBuildState()
 	state.Graph.AddTarget(target1)
@@ -197,6 +207,14 @@ func TestFullOutputs(t *testing.T) {
 	assert.Equal(t, []string{"plz-out/gen/src/core/file1.go", "plz-out/gen/src/core/file2.go"}, target.FullOutputs())
 }
 
+func TestAllOutputs(t *testing.T) {
+	target := makeTarget1("//please:please", "PUBLIC")
+	target.AddOutput("please")
+	target.AddOutput("plz")
+	target.AddOutputDirectory("dir")
+	assert.Equal(t, []string{"please.out", "plz", "dir"}, target.AllOutputs())
+}
+
 func TestProvideFor(t *testing.T) {
 	// target1 is provided directly since they have a simple dependency
 	target1 := makeTarget1("//src/core:target1", "PUBLIC")
@@ -264,7 +282,7 @@ func TestLabels(t *testing.T) {
 	assert.Equal(t, 2, len(target.Labels))
 	// "test" label is implicit on tests.
 	assert.False(t, target.HasLabel("test"))
-	target.IsTest = true
+	target.Test = new(TestFields)
 	assert.True(t, target.HasLabel("test"))
 }
 
@@ -303,11 +321,12 @@ func TestGetTestCommand(t *testing.T) {
 	state.Config.Build.Config = "dbg"
 	state.Config.Build.FallbackConfig = "opt"
 	target := makeTarget1("//src/core:target1", "PUBLIC")
-	target.TestCommand = "test1"
+	target.Test = new(TestFields)
+	target.Test.Command = "test1"
 	assert.Equal(t, "test1", target.GetTestCommand(state))
 	assert.Panics(t, func() { target.AddTestCommand("opt", "test2") },
 		"Should panic when adding a config command to a target with a command already")
-	target.TestCommand = ""
+	target.Test.Command = ""
 	target.AddTestCommand("opt", "test3")
 	target.AddTestCommand("dbg", "test4")
 	assert.Equal(t, "test4", target.GetTestCommand(state), "Current config is dbg")
@@ -334,6 +353,26 @@ func TestHasAbsoluteSource(t *testing.T) {
 	assert.True(t, target.HasAbsoluteSource("src/core/file1.go"))
 	assert.True(t, target.HasAbsoluteSource("src/core/file2.go"))
 	assert.False(t, target.HasSource("src/core/file3.go"))
+}
+
+func TestAllSourcesNamed(t *testing.T) {
+	target := makeTarget1("//src/core:target1", "")
+	target.AddNamedSource("c", FileLabel{File: "file.c"})
+	target.AddNamedSource("hdrs", FileLabel{File: "file.h"})
+
+	assert.ElementsMatch(t, []BuildInput{FileLabel{File: "file.c"}, FileLabel{File: "file.h"}}, target.AllSources())
+	assert.Equal(t, target.NamedSources["c"], []BuildInput{FileLabel{File: "file.c"}})
+	assert.Equal(t, target.NamedSources["hdrs"], []BuildInput{FileLabel{File: "file.h"}})
+}
+
+func TestAllDataNamed(t *testing.T) {
+	target := makeTarget1("//src/core:target1", "")
+	target.AddNamedDatum("c", FileLabel{File: "file.c"})
+	target.AddNamedDatum("hdrs", FileLabel{File: "file.h"})
+
+	assert.ElementsMatch(t, []BuildInput{FileLabel{File: "file.c"}, FileLabel{File: "file.h"}}, target.AllData())
+	assert.Equal(t, target.NamedData["c"], []BuildInput{FileLabel{File: "file.c"}})
+	assert.Equal(t, target.NamedData["hdrs"], []BuildInput{FileLabel{File: "file.h"}})
 }
 
 func TestToolPath(t *testing.T) {
@@ -372,13 +411,14 @@ func TestDependencies(t *testing.T) {
 }
 
 func TestBuildDependencies(t *testing.T) {
+	state := NewDefaultBuildState()
 	target1 := makeTarget1("//src/core:target1", "")
 	target2 := makeTarget1("//src/core:target2", "", target1)
 	target3 := makeTarget1("//src/core:target3", "", target2)
 	target3.AddDatum(target1.Label)
-	assert.Equal(t, []*BuildTarget{}, target1.BuildDependencies())
-	assert.Equal(t, []*BuildTarget{target1}, target2.BuildDependencies())
-	assert.Equal(t, []*BuildTarget{target2}, target3.BuildDependencies())
+	assert.Equal(t, []*BuildTarget{}, target1.BuildDependencies(state))
+	assert.Equal(t, []*BuildTarget{target1}, target2.BuildDependencies(state))
+	assert.Equal(t, []*BuildTarget{target2}, target3.BuildDependencies(state))
 }
 
 func TestDeclaredDependenciesStrict(t *testing.T) {
@@ -494,16 +534,16 @@ func TestNamedOutputs(t *testing.T) {
 	assert.Equal(t, []string{"hdrs", "srcs"}, target.DeclaredOutputNames())
 }
 
-func TestAllLocalSources(t *testing.T) {
+func TestAllLocalSourcePaths(t *testing.T) {
 	target := makeTarget1("//src/core:target1", "")
 	target.AddSource(FileLabel{File: "target1.go", Package: "src/core"})
 	target.AddSource(BuildLabel{Name: "target2", PackageName: "src/core"})
 	target.AddSource(SystemFileLabel{Path: "/usr/bin/bash"})
-	assert.Equal(t, []string{"src/core/target1.go"}, target.AllLocalSources())
+	assert.Equal(t, []string{"src/core/target1.go"}, target.AllLocalSourcePaths())
 }
 
 func TestAllURLs(t *testing.T) {
-	config := DefaultConfiguration()
+	state := NewDefaultBuildState()
 	target := makeTarget1("//src/core:remote1", "")
 	target.IsRemoteFile = true
 	target.AddSource(URLLabel("https://github.com/thought-machine/please"))
@@ -511,7 +551,7 @@ func TestAllURLs(t *testing.T) {
 	assert.Equal(t, []string{
 		"https://github.com/thought-machine/please",
 		"https://github.com/thought-machine/pleasings",
-	}, target.AllURLs(config))
+	}, target.AllURLs(state))
 }
 
 func TestCheckSecrets(t *testing.T) {
@@ -639,7 +679,8 @@ func TestExternalDependencies(t *testing.T) {
 
 func TestBuildTargetOwnBuildInputs(t *testing.T) {
 	buildFiles := []string{"BUILD_FILE"}
-	t.Run("file is in package", func(t *testing.T) {
+
+	t.Run("file as source is in package", func(t *testing.T) {
 		state := NewDefaultBuildState()
 		state.Config.Parse.BuildFileName = buildFiles
 
@@ -655,7 +696,23 @@ func TestBuildTargetOwnBuildInputs(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("file is subpackage", func(t *testing.T) {
+	t.Run("file as named source is in package", func(t *testing.T) {
+		state := NewDefaultBuildState()
+		state.Config.Parse.BuildFileName = buildFiles
+
+		target := makeTarget1("//src/core/test_data/project", "PUBLIC")
+		target.AddNamedSource("srcs", FileLabel{
+			File:    "project.file",
+			Package: "src/core/test_data/project",
+		})
+
+		target = state.Graph.AddTarget(target)
+
+		err := target.CheckTargetOwnsBuildInputs(state)
+		assert.NoError(t, err)
+	})
+
+	t.Run("file as source is subpackage", func(t *testing.T) {
 		state := NewDefaultBuildState()
 		state.Config.Parse.BuildFileName = buildFiles
 
@@ -671,12 +728,140 @@ func TestBuildTargetOwnBuildInputs(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("file is in subpackage", func(t *testing.T) {
+	t.Run("file as named source is subpackage", func(t *testing.T) {
+		state := NewDefaultBuildState()
+		state.Config.Parse.BuildFileName = buildFiles
+
+		target := makeTarget1("//src/core/test_data/project", "PUBLIC")
+		target.AddNamedSource("srcs", FileLabel{
+			File:    "sub_package",
+			Package: "src/core/test_data/project",
+		})
+
+		target = state.Graph.AddTarget(target)
+
+		err := target.CheckTargetOwnsBuildInputs(state)
+		assert.Error(t, err)
+	})
+
+	t.Run("file as source is in subpackage", func(t *testing.T) {
 		state := NewDefaultBuildState()
 		state.Config.Parse.BuildFileName = buildFiles
 
 		target := makeTarget1("//src/core/test_data/project", "PUBLIC")
 		target.AddSource(FileLabel{
+			File:    "sub_package/sub_package.file",
+			Package: "src/core/test_data/project",
+		})
+
+		target = state.Graph.AddTarget(target)
+
+		err := target.CheckTargetOwnsBuildInputs(state)
+		assert.Error(t, err)
+	})
+
+	t.Run("file as named source is in subpackage", func(t *testing.T) {
+		state := NewDefaultBuildState()
+		state.Config.Parse.BuildFileName = buildFiles
+
+		target := makeTarget1("//src/core/test_data/project", "PUBLIC")
+		target.AddNamedSource("srcs", FileLabel{
+			File:    "sub_package/sub_package.file",
+			Package: "src/core/test_data/project",
+		})
+
+		target = state.Graph.AddTarget(target)
+
+		err := target.CheckTargetOwnsBuildInputs(state)
+		assert.Error(t, err)
+	})
+
+	t.Run("file as data is in package", func(t *testing.T) {
+		state := NewDefaultBuildState()
+		state.Config.Parse.BuildFileName = buildFiles
+
+		target := makeTarget1("//src/core/test_data/project", "PUBLIC")
+		target.AddDatum(FileLabel{
+			File:    "project.file",
+			Package: "src/core/test_data/project",
+		})
+
+		target = state.Graph.AddTarget(target)
+
+		err := target.CheckTargetOwnsBuildInputs(state)
+		assert.NoError(t, err)
+	})
+
+	t.Run("file as named data is in package", func(t *testing.T) {
+		state := NewDefaultBuildState()
+		state.Config.Parse.BuildFileName = buildFiles
+
+		target := makeTarget1("//src/core/test_data/project", "PUBLIC")
+		target.AddNamedDatum("srcs", FileLabel{
+			File:    "project.file",
+			Package: "src/core/test_data/project",
+		})
+
+		target = state.Graph.AddTarget(target)
+
+		err := target.CheckTargetOwnsBuildInputs(state)
+		assert.NoError(t, err)
+	})
+
+	t.Run("file as data is subpackage", func(t *testing.T) {
+		state := NewDefaultBuildState()
+		state.Config.Parse.BuildFileName = buildFiles
+
+		target := makeTarget1("//src/core/test_data/project", "PUBLIC")
+		target.AddDatum(FileLabel{
+			File:    "sub_package",
+			Package: "src/core/test_data/project",
+		})
+
+		target = state.Graph.AddTarget(target)
+
+		err := target.CheckTargetOwnsBuildInputs(state)
+		assert.Error(t, err)
+	})
+
+	t.Run("file as named data is subpackage", func(t *testing.T) {
+		state := NewDefaultBuildState()
+		state.Config.Parse.BuildFileName = buildFiles
+
+		target := makeTarget1("//src/core/test_data/project", "PUBLIC")
+		target.AddNamedDatum("srcs", FileLabel{
+			File:    "sub_package",
+			Package: "src/core/test_data/project",
+		})
+
+		target = state.Graph.AddTarget(target)
+
+		err := target.CheckTargetOwnsBuildInputs(state)
+		assert.Error(t, err)
+	})
+
+	t.Run("file as data is in subpackage", func(t *testing.T) {
+		state := NewDefaultBuildState()
+		state.Config.Parse.BuildFileName = buildFiles
+
+		target := makeTarget1("//src/core/test_data/project", "PUBLIC")
+		target.AddDatum(FileLabel{
+			File:    "sub_package/sub_package.file",
+			Package: "src/core/test_data/project",
+		})
+
+		target = state.Graph.AddTarget(target)
+
+		err := target.CheckTargetOwnsBuildInputs(state)
+		assert.Error(t, err)
+	})
+
+	t.Run("file as named data is in subpackage", func(t *testing.T) {
+		state := NewDefaultBuildState()
+		state.Config.Parse.BuildFileName = buildFiles
+
+		target := makeTarget1("//src/core/test_data/project", "PUBLIC")
+		target.AddNamedDatum("srcs", FileLabel{
 			File:    "sub_package/sub_package.file",
 			Package: "src/core/test_data/project",
 		})
@@ -728,6 +913,31 @@ func TestBuildTargetOwnBuildOutput(t *testing.T) {
 		err := target.CheckTargetOwnsBuildOutputs(state)
 		assert.Error(t, err)
 	})
+}
+
+func TestIsTool(t *testing.T) {
+	target := makeTarget1("//src/core/test_data/project", "PUBLIC")
+
+	noEP := BuildLabel{
+		PackageName: "tools",
+		Name:        "go",
+	}
+
+	withEP := AnnotatedOutputLabel{
+		BuildLabel: BuildLabel{
+			PackageName: "tools",
+			Name:        "java",
+		},
+		Annotation: "javac",
+	}
+
+	target.AddTool(noEP)
+	target.AddTool(withEP)
+
+	assert.True(t, target.IsTool(noEP))
+	l, ok := withEP.Label()
+	assert.True(t, ok)
+	assert.True(t, target.IsTool(l))
 }
 
 func makeTarget1(label, visibility string, deps ...*BuildTarget) *BuildTarget {

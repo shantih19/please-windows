@@ -6,13 +6,16 @@ go_library(
     ),
     visibility = ["PUBLIC"],
     deps = [
+        "//src/cli/logging",
         "//third_party/go:cli-init",
+        "//third_party/go:deferred_regex",
         "//third_party/go:go-flags",
         "//third_party/go:humanize",
+        "//third_party/go:levenshtein",
         "//third_party/go:logging",
         "//third_party/go:promptui",
         "//third_party/go:semver",
-        "//third_party/go:terminal",
+        "//third_party/go:xterm",
     ],
 )
 
@@ -31,16 +34,6 @@ go_test(
     deps = [
         ":cli",
         "//third_party/go:go-flags",
-        "//third_party/go:testify",
-    ],
-)
-
-go_test(
-    name = "stdin_test",
-    srcs = ["stdin_test.go"],
-    data = ["test_data"],
-    deps = [
-        ":cli",
         "//third_party/go:testify",
     ],
 )

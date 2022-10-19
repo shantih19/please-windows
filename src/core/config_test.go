@@ -4,20 +4,21 @@ import (
 	"bytes"
 	"os"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jessevdk/go-flags"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thought-machine/go-flags"
 
 	"github.com/thought-machine/please/src/cli"
 )
 
 func TestPlzConfigWorking(t *testing.T) {
+	RepoRoot = "/repo/root"
 	config, err := ReadConfigFiles([]string{"src/core/test_data/working.plzconfig"}, nil)
+
 	assert.NoError(t, err)
 	assert.Equal(t, "pexmabob", config.Python.PexTool)
 	assert.Equal(t, "javac", config.Java.JavacTool)
@@ -26,6 +27,7 @@ func TestPlzConfigWorking(t *testing.T) {
 	assert.Equal(t, "8", config.Java.SourceLevel)
 	assert.Equal(t, "7", config.Java.TargetLevel)
 	assert.Equal(t, "10", config.Java.ReleaseLevel)
+	assert.Equal(t, "/repo/root/plz-out/please", config.Please.Location)
 }
 
 func TestPlzConfigFailing(t *testing.T) {
@@ -153,13 +155,32 @@ func TestConfigOverrideOptions(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestPleaseRelativeLocationOverride(t *testing.T) {
+	RepoRoot = "/repo/root"
+	config := DefaultConfiguration()
+
+	err := config.ApplyOverrides(map[string]string{"please.location": "./plz-out/please"})
+	assert.NoError(t, err)
+	assert.Equal(t, "/repo/root/plz-out/please", config.Please.Location)
+}
+
+func TestPleaseTildeLocationOverride(t *testing.T) {
+	t.Setenv("HOME", "/path/to/home")
+
+	config := DefaultConfiguration()
+
+	err := config.ApplyOverrides(map[string]string{"please.location": "~/please-location"})
+	assert.NoError(t, err)
+	assert.Equal(t, "/path/to/home/please-location", config.Please.Location)
+}
+
 func TestReadSemver(t *testing.T) {
 	config, err := ReadConfigFiles([]string{"src/core/test_data/version_good.plzconfig"}, nil)
 	assert.NoError(t, err)
 	assert.EqualValues(t, 2, config.Please.Version.Major)
 	assert.EqualValues(t, 3, config.Please.Version.Minor)
 	assert.EqualValues(t, 4, config.Please.Version.Patch)
-	config, err = ReadConfigFiles([]string{"src/core/test_data/version_bad.plzconfig"}, nil)
+	_, err = ReadConfigFiles([]string{"src/core/test_data/version_bad.plzconfig"}, nil)
 	assert.Error(t, err)
 }
 
@@ -168,7 +189,7 @@ func TestReadDurations(t *testing.T) {
 	assert.NoError(t, err)
 	assert.EqualValues(t, 500*time.Millisecond, config.Build.Timeout)
 	assert.EqualValues(t, 5*time.Second, config.Test.Timeout)
-	config, err = ReadConfigFiles([]string{"src/core/test_data/duration_bad.plzconfig"}, nil)
+	_, err = ReadConfigFiles([]string{"src/core/test_data/duration_bad.plzconfig"}, nil)
 	assert.Error(t, err)
 }
 
@@ -176,7 +197,7 @@ func TestReadByteSizes(t *testing.T) {
 	config, err := ReadConfigFiles([]string{"src/core/test_data/bytesize_good.plzconfig"}, nil)
 	assert.NoError(t, err)
 	assert.EqualValues(t, 500*1000*1000, config.Cache.DirCacheHighWaterMark)
-	config, err = ReadConfigFiles([]string{"src/core/test_data/bytesize_bad.plzconfig"}, nil)
+	_, err = ReadConfigFiles([]string{"src/core/test_data/bytesize_bad.plzconfig"}, nil)
 	assert.Error(t, err)
 }
 
@@ -196,63 +217,81 @@ func TestConfigVerifiesOptions(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestDefaultHashCheckers(t *testing.T) {
+	config, err := ReadConfigFiles(nil, nil)
+
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, []string{"sha1", "sha256", "blake3"}, config.Build.HashCheckers)
+}
+
+func TestHashCheckersConfig(t *testing.T) {
+	config, err := ReadConfigFiles([]string{"src/core/test_data/hashcheckers.plzconfig"}, nil)
+
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, []string{"blake3"}, config.Build.HashCheckers)
+}
+
+func TestOverrideHashCheckersConfig(t *testing.T) {
+	config, err := ReadConfigFiles([]string{"src/core/test_data/hashcheckers.plzconfig"}, nil)
+	assert.NoError(t, err)
+
+	err = config.ApplyOverrides(map[string]string{"build.hashcheckers": "sha256"})
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, []string{"sha256"}, config.Build.HashCheckers)
+}
+
+func TestOverrideHashCheckersNoConfig(t *testing.T) {
+	config, err := ReadConfigFiles(nil, nil)
+	assert.NoError(t, err)
+
+	err = config.ApplyOverrides(map[string]string{"build.hashcheckers": "sha1,blake3"})
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, []string{"sha1", "blake3"}, config.Build.HashCheckers)
+}
+
+func TestUnknownHashChecker(t *testing.T) {
+	config, err := ReadConfigFiles(nil, nil)
+	assert.NoError(t, err)
+
+	err = config.ApplyOverrides(map[string]string{"build.hashcheckers": "fake-algo"})
+	assert.Error(t, err)
+}
+
 func TestBuildEnvSection(t *testing.T) {
 	config, err := ReadConfigFiles([]string{"src/core/test_data/buildenv.plzconfig"}, nil)
 	assert.NoError(t, err)
 	expected := []string{
-		"ARCH=" + runtime.GOARCH,
 		"BAR_BAR=first",
 		"FOO_BAR=second",
-		"GOARCH=" + runtime.GOARCH,
-		"GOOS=" + runtime.GOOS,
-		"OS=" + runtime.GOOS,
 		"PATH=" + os.Getenv("TMP_DIR") + ":/usr/local/bin:/usr/bin:/bin",
-		"XARCH=x86_64",
-		"XOS=" + xos(),
 	}
-	assert.Equal(t, expected, config.GetBuildEnv())
+	assert.ElementsMatch(t, expected, config.GetBuildEnv())
 }
 
 func TestPassEnv(t *testing.T) {
-	err := os.Setenv("FOO", "first")
-	assert.NoError(t, err)
-	err = os.Setenv("BAR", "second")
-	assert.NoError(t, err)
+	t.Setenv("FOO", "first")
+	t.Setenv("BAR", "second")
 	config, err := ReadConfigFiles([]string{"src/core/test_data/passenv.plzconfig"}, nil)
 	assert.NoError(t, err)
 	expected := []string{
-		"ARCH=" + runtime.GOARCH,
 		"BAR=second",
 		"FOO=first",
-		"GOARCH=" + runtime.GOARCH,
-		"GOOS=" + runtime.GOOS,
-		"OS=" + runtime.GOOS,
 		"PATH=" + os.Getenv("TMP_DIR") + ":" + os.Getenv("PATH"),
-		"XARCH=x86_64",
-		"XOS=" + xos(),
 	}
-	assert.Equal(t, expected, config.GetBuildEnv())
+	assert.ElementsMatch(t, expected, config.GetBuildEnv())
 }
 
 func TestPassUnsafeEnv(t *testing.T) {
-	err := os.Setenv("FOO", "first")
-	assert.NoError(t, err)
-	err = os.Setenv("BAR", "second")
-	assert.NoError(t, err)
+	t.Setenv("FOO", "first")
+	t.Setenv("BAR", "second")
 	config, err := ReadConfigFiles([]string{"src/core/test_data/passunsafeenv.plzconfig"}, nil)
 	assert.NoError(t, err)
 	expected := []string{
-		"ARCH=" + runtime.GOARCH,
 		"BAR=second",
 		"FOO=first",
-		"GOARCH=" + runtime.GOARCH,
-		"GOOS=" + runtime.GOOS,
-		"OS=" + runtime.GOOS,
 		"PATH=" + os.Getenv("TMP_DIR") + ":" + os.Getenv("PATH"),
-		"XARCH=x86_64",
-		"XOS=" + xos(),
 	}
-	assert.Equal(t, expected, config.GetBuildEnv())
+	assert.ElementsMatch(t, expected, config.GetBuildEnv())
 }
 
 func TestPassUnsafeEnvExcludedFromHash(t *testing.T) {
@@ -267,10 +306,8 @@ func TestPassUnsafeEnvExcludedFromHash(t *testing.T) {
 
 	expected := config.Hash()
 
-	err = os.Setenv("FOO", "first")
-	require.NoError(t, err)
-	err = os.Setenv("BAR", "second")
-	require.NoError(t, err)
+	t.Setenv("FOO", "first")
+	t.Setenv("BAR", "second")
 
 	assert.Equal(t, expected, config.Hash())
 }
@@ -279,13 +316,6 @@ func TestBuildPathWithPathEnv(t *testing.T) {
 	config, err := ReadConfigFiles([]string{"src/core/test_data/passenv.plzconfig"}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, config.Build.Path, strings.Split(os.Getenv("PATH"), ":"))
-}
-
-func xos() string {
-	if runtime.GOOS == "darwin" {
-		return "osx"
-	}
-	return runtime.GOOS
 }
 
 func TestUpdateArgsWithAliases(t *testing.T) {
@@ -330,7 +360,7 @@ func TestParseNewFormatAliases(t *testing.T) {
 func TestAttachAliasFlags(t *testing.T) {
 	c, err := ReadConfigFiles([]string{"src/core/test_data/alias.plzconfig"}, nil)
 	assert.NoError(t, err)
-	os.Setenv("GO_FLAGS_COMPLETION", "1")
+	t.Setenv("GO_FLAGS_COMPLETION", "1")
 	p := flags.NewParser(&struct{}{}, 0)
 	b := c.AttachAliasFlags(p)
 	assert.True(t, b)
@@ -381,4 +411,32 @@ func TestGetTags(t *testing.T) {
 
 	assert.Equal(t, "Version", tags["PLZ_VERSION"].Name)
 	assert.True(t, tags["PLZ_VERSION"].Type == reflect.TypeOf(cli.Version{}))
+}
+
+func TestEnsurePleaseLocation(t *testing.T) {
+	t.Setenv("HOME", "/path/to/home")
+
+	config := DefaultConfiguration()
+
+	// Empty please location config resolves to this executable's directory
+	config.Please.Location = ""
+	config.EnsurePleaseLocation()
+	assert.Equal(t, os.Getenv("PWD"), config.Please.Location)
+
+	// Expands ~
+	config.Please.Location = "~"
+	config.EnsurePleaseLocation()
+	assert.Equal(t, "/path/to/home", config.Please.Location)
+
+	// Resolves relative path to repo root
+	RepoRoot = "/repo/root"
+	config.Please.Location = "./plz-out/please"
+	config.EnsurePleaseLocation()
+	assert.Equal(t, "/repo/root/plz-out/please", config.Please.Location)
+}
+
+func TestPluginConfig(t *testing.T) {
+	config, err := ReadConfigFiles([]string{"src/core/test_data/plugin.plzconfig"}, nil)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"fooc"}, config.Plugin["foo"].ExtraValues["fooctool"])
 }

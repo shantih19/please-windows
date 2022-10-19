@@ -5,19 +5,20 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/streamrail/concurrent-map"
-	"gopkg.in/op/go-logging.v1"
 
 	"github.com/thought-machine/please/src/cli"
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/fs"
+	"github.com/thought-machine/please/src/process"
 	"github.com/thought-machine/please/src/run"
 )
 
-var log = logging.MustGetLogger("watch")
+var log = logging.Log
 
 const debounceInterval = 100 * time.Millisecond
 
@@ -35,8 +36,8 @@ func Watch(state *core.BuildState, labels core.BuildLabels, callback CallbackFun
 		log.Fatalf("Error setting up watcher: %s", err)
 	}
 	// This sets up the actual watches. It must be done in a separate goroutine.
-	files := cmap.New()
-	go startWatching(watcher, state, labels, files)
+	var files sync.Map
+	go startWatching(watcher, state, labels, &files)
 
 	parentCtx, cancelParent := context.WithCancel(context.Background())
 	cli.AtExit(func() {
@@ -56,7 +57,7 @@ func Watch(state *core.BuildState, labels core.BuildLabels, callback CallbackFun
 		select {
 		case event := <-watcher.Events:
 			log.Info("Event: %s", event)
-			if !files.Has(event.Name) {
+			if _, present := files.Load(event.Name); !present {
 				log.Notice("Skipping notification for %s", event.Name)
 				continue
 			}
@@ -80,7 +81,7 @@ func Watch(state *core.BuildState, labels core.BuildLabels, callback CallbackFun
 	}
 }
 
-func startWatching(watcher *fsnotify.Watcher, state *core.BuildState, labels []core.BuildLabel, files cmap.ConcurrentMap) {
+func startWatching(watcher *fsnotify.Watcher, state *core.BuildState, labels []core.BuildLabel, files *sync.Map) {
 	// Deduplicate seen targets & sources.
 	targets := map[*core.BuildTarget]struct{}{}
 	dirs := map[string]struct{}{}
@@ -101,9 +102,9 @@ func startWatching(watcher *fsnotify.Watcher, state *core.BuildState, labels []c
 			startWatch(dep)
 		}
 		pkg := state.Graph.PackageOrDie(target.Label)
-		if !files.Has(pkg.Filename) {
+		if _, present := files.Load(pkg.Filename); !present {
 			log.Notice("Adding watch on %s", pkg.Filename)
-			files.Set(pkg.Filename, struct{}{})
+			files.Store(pkg.Filename, struct{}{})
 		}
 		for _, subinclude := range pkg.Subincludes {
 			startWatch(state.Graph.TargetOrDie(subinclude))
@@ -117,13 +118,13 @@ func startWatching(watcher *fsnotify.Watcher, state *core.BuildState, labels []c
 	fmt.Println("And now my watch begins...")
 }
 
-func addSource(watcher *fsnotify.Watcher, state *core.BuildState, source core.BuildInput, dirs map[string]struct{}, files cmap.ConcurrentMap) {
-	if source.Label() == nil {
+func addSource(watcher *fsnotify.Watcher, state *core.BuildState, source core.BuildInput, dirs map[string]struct{}, files *sync.Map) {
+	if _, ok := source.Label(); !ok {
 		for _, src := range source.Paths(state.Graph) {
 			if err := fs.Walk(src, func(src string, isDir bool) error {
-				files.Set(src, struct{}{})
+				files.Store(src, struct{}{})
 				if !path.IsAbs(src) {
-					files.Set("./"+src, struct{}{})
+					files.Store("./"+src, struct{}{})
 				}
 				dir := src
 				if !isDir {
@@ -147,7 +148,7 @@ func addSource(watcher *fsnotify.Watcher, state *core.BuildState, source core.Bu
 // anyTests returns true if any of the given labels refer to tests.
 func anyTests(state *core.BuildState, labels []core.BuildLabel) bool {
 	for _, l := range labels {
-		if state.Graph.TargetOrDie(l).IsTest {
+		if state.Graph.TargetOrDie(l).IsTest() {
 			return true
 		}
 	}
@@ -165,12 +166,18 @@ func build(ctx context.Context, state *core.BuildState, labels []core.BuildLabel
 	ns.NeedRun = state.NeedRun
 	ns.Watch = true
 	ns.CleanWorkdirs = state.CleanWorkdirs
-	ns.DebugTests = state.DebugTests
+	ns.DebugFailingTests = state.DebugFailingTests
 	ns.ShowAllOutput = state.ShowAllOutput
 	ns.StartTime = time.Now()
 	callback(ns, labels)
 	if state.NeedRun {
 		// Don't wait for this, its lifetime will be controlled by the context.
-		go run.Parallel(ctx, state, labels, nil, state.Config.Please.NumThreads, false, false, false, false, "")
+		als := make([]core.AnnotatedOutputLabel, len(labels))
+		for i, l := range labels {
+			als[i] = core.AnnotatedOutputLabel{
+				BuildLabel: l,
+			}
+		}
+		go run.Parallel(ctx, state, als, nil, state.Config.Please.NumThreads, process.Default, false, false, false, false, "")
 	}
 }

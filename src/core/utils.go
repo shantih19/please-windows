@@ -15,13 +15,13 @@ import (
 // RepoRoot is the root of the Please repository
 var RepoRoot string
 
-// initialWorkingDir is the directory we began in. Early on we chdir() to the repo root but for
+// InitialWorkingDir is the directory we began in. Early on we chdir() to the repo root but for
 // some things we need to remember this.
-var initialWorkingDir string
+var InitialWorkingDir string
 
-// initialPackage is the initial subdir of the working directory, ie. what package did we start in.
-// This is similar but not identical to initialWorkingDir.
-var initialPackage string
+// InitialPackagePath is the initial subdir of the working directory, ie. what package did we start in.
+// This is similar but not identical to InitialWorkingDir.
+var InitialPackagePath string
 
 // usingBazelWorkspace is true if we detected a Bazel WORKSPACE file to find our repo root.
 var usingBazelWorkspace bool
@@ -32,8 +32,8 @@ const DirPermissions = os.ModeDir | 0775
 // FindRepoRoot returns the root directory of the current repo and sets the initial working dir.
 // It returns true if the repo root was found.
 func FindRepoRoot() bool {
-	initialWorkingDir, _ = os.Getwd()
-	RepoRoot, initialPackage = getRepoRoot(ConfigFileName)
+	InitialWorkingDir, _ = os.Getwd()
+	RepoRoot, InitialPackagePath = getRepoRoot(ConfigFileName)
 	return RepoRoot != ""
 }
 
@@ -45,7 +45,7 @@ func MustFindRepoRoot() string {
 	} else if FindRepoRoot() {
 		return RepoRoot
 	}
-	RepoRoot, initialPackage = getRepoRoot("WORKSPACE")
+	RepoRoot, InitialPackagePath = getRepoRoot("WORKSPACE")
 	if RepoRoot != "" {
 		log.Warning("No .plzconfig file found to define the repo root.")
 		log.Warning("Falling back to Bazel WORKSPACE at %s", path.Join(RepoRoot, "WORKSPACE"))
@@ -54,7 +54,7 @@ func MustFindRepoRoot() string {
 	}
 	// Check the config for a default repo location. Of course, we have to load system-level config
 	// in order to do that...
-	config, err := ReadConfigFiles([]string{MachineConfigFileName, fs.ExpandHomePath(UserConfigFileName)}, nil)
+	config, err := ReadConfigFiles(defaultGlobalConfigFiles(), nil)
 	if err != nil {
 		log.Fatalf("Error reading config file: %s", err)
 	}
@@ -72,7 +72,7 @@ func InitialPackage() []BuildLabel {
 	// It's possible to start off in directories that aren't legal package names, because
 	// our package naming is stricter than directory naming requirements.
 	// In that case move up until we find somewhere we can run from.
-	dir := initialPackage
+	dir := InitialPackagePath
 	for dir != "." {
 		if label, err := TryNewBuildLabel(dir, "test"); err == nil {
 			label.Name = "..."
@@ -104,13 +104,13 @@ func getRepoRoot(filename string) (string, string) {
 // StartedAtRepoRoot returns true if the build was initiated from the repo root.
 // Used to provide slightly nicer output in some places.
 func StartedAtRepoRoot() bool {
-	return RepoRoot == initialWorkingDir
+	return RepoRoot == InitialWorkingDir
 }
 
 // ReturnToInitialWorkingDir changes directory back to where plz was first started from.
 func ReturnToInitialWorkingDir() {
-	if err := os.Chdir(initialWorkingDir); err != nil {
-		log.Error("Failed to change directory to %s: %s", initialWorkingDir, err)
+	if err := os.Chdir(InitialWorkingDir); err != nil {
+		log.Error("Failed to change directory to %s: %s", InitialWorkingDir, err)
 	}
 }
 
@@ -122,12 +122,12 @@ type SourcePair struct{ Src, Tmp string }
 // and rules that require transitive dependencies.
 // Yielded values are pairs of the original source location and its temporary location for this rule.
 // If includeTools is true it yields the target's tools as well.
-func IterSources(graph *BuildGraph, target *BuildTarget, includeTools bool) <-chan SourcePair {
+func IterSources(state *BuildState, graph *BuildGraph, target *BuildTarget, includeTools bool) <-chan SourcePair {
 	ch := make(chan SourcePair)
 	done := map[string]bool{}
 	tmpDir := target.TmpDir()
 	go func() {
-		for input := range IterInputs(graph, target, includeTools, false) {
+		for input := range IterInputs(state, graph, target, includeTools, false) {
 			fullPaths := input.FullPaths(graph)
 			for i, sourcePath := range input.Paths(graph) {
 				if tmpPath := path.Join(tmpDir, sourcePath); !done[tmpPath] {
@@ -142,7 +142,7 @@ func IterSources(graph *BuildGraph, target *BuildTarget, includeTools bool) <-ch
 }
 
 // IterInputs iterates all the inputs for a target.
-func IterInputs(graph *BuildGraph, target *BuildTarget, includeTools, sourcesOnly bool) <-chan BuildInput {
+func IterInputs(state *BuildState, graph *BuildGraph, target *BuildTarget, includeTools, sourcesOnly bool) <-chan BuildInput {
 	ch := make(chan BuildInput)
 	done := map[BuildLabel]bool{}
 	var inner func(dependency *BuildTarget)
@@ -150,15 +150,17 @@ func IterInputs(graph *BuildGraph, target *BuildTarget, includeTools, sourcesOnl
 		if dependency != target {
 			ch <- dependency.Label
 		}
-		// All the sources of this target now count as done
-		for _, src := range dependency.AllSources() {
-			if label := src.Label(); label != nil && dependency.IsSourceOnlyDep(*label) {
-				done[*label] = true
+		if !state.Config.FeatureFlags.NoIterSourcesMarked {
+			// All the sources of this target now count as done
+			for _, src := range dependency.AllSources() {
+				if label, ok := src.Label(); ok && dependency.IsSourceOnlyDep(label) {
+					done[label] = true
+				}
 			}
 		}
 		done[dependency.Label] = true
 		if target == dependency || (target.NeedsTransitiveDependencies && !dependency.OutputIsComplete) {
-			for _, dep := range dependency.BuildDependencies() {
+			for _, dep := range dependency.BuildDependencies(state) {
 				for _, dep2 := range recursivelyProvideFor(graph, target, dependency, dep.Label) {
 					if !done[dep2] && !dependency.IsTool(dep2) {
 						inner(graph.TargetOrDie(dep2))
@@ -176,14 +178,12 @@ func IterInputs(graph *BuildGraph, target *BuildTarget, includeTools, sourcesOnl
 		}
 	}
 	go func() {
-		// Yield the sources of the current target
-		srcs := target.AllSources()
-		if includeTools {
-			srcs = append(srcs, target.AllTools()...)
+		for _, source := range target.AllSources() {
+			recursivelyProvideSource(graph, target, source, ch)
 		}
-		for _, source := range srcs {
-			for _, src := range recursivelyProvideSource(graph, target, source) {
-				ch <- src
+		if includeTools {
+			for _, tool := range target.AllTools() {
+				recursivelyProvideSource(graph, target, tool, ch)
 			}
 		}
 		if !sourcesOnly {
@@ -219,27 +219,24 @@ func recursivelyProvideFor(graph *BuildGraph, target, dependency *BuildTarget, d
 }
 
 // recursivelyProvideSource is similar to recursivelyProvideFor but operates on a BuildInput.
-func recursivelyProvideSource(graph *BuildGraph, target *BuildTarget, src BuildInput) []BuildInput {
-	if label := src.nonOutputLabel(); label != nil {
-		dep := graph.TargetOrDie(*label)
-		provided := recursivelyProvideFor(graph, target, target, dep.Label)
-		ret := make([]BuildInput, len(provided))
-		for i, p := range provided {
-			ret[i] = p
+func recursivelyProvideSource(graph *BuildGraph, target *BuildTarget, src BuildInput, ch chan BuildInput) {
+	if label, ok := src.nonOutputLabel(); ok {
+		for _, p := range recursivelyProvideFor(graph, target, target, label) {
+			ch <- p
 		}
-		return ret
+		return
 	}
-	return []BuildInput{src}
+	ch <- src
 }
 
-// IterRuntimeFiles yields all the runtime files for a rule (outputs & data files), similar to above.
-func IterRuntimeFiles(graph *BuildGraph, target *BuildTarget, absoluteOuts bool, testRun int) <-chan SourcePair {
+// IterRuntimeFiles yields all the runtime files for a rule (outputs, tools & data files), similar to above.
+func IterRuntimeFiles(graph *BuildGraph, target *BuildTarget, absoluteOuts bool, runtimeDir string) <-chan SourcePair {
 	done := map[string]bool{}
 	ch := make(chan SourcePair)
 
 	pushOut := func(src, out string) {
 		if absoluteOuts {
-			out = path.Join(RepoRoot, target.TestDir(testRun), out)
+			out = path.Join(RepoRoot, runtimeDir, out)
 		}
 		if !done[out] {
 			ch <- SourcePair{src, out}
@@ -252,6 +249,7 @@ func IterRuntimeFiles(graph *BuildGraph, target *BuildTarget, absoluteOuts bool,
 		for _, out := range target.Outputs() {
 			pushOut(path.Join(outDir, out), out)
 		}
+
 		for _, data := range target.AllData() {
 			fullPaths := data.FullPaths(graph)
 			for i, dataPath := range data.Paths(graph) {
@@ -259,6 +257,29 @@ func IterRuntimeFiles(graph *BuildGraph, target *BuildTarget, absoluteOuts bool,
 			}
 		}
 
+		if target.Test != nil {
+			for _, tool := range target.AllTestTools() {
+				fullPaths := tool.FullPaths(graph)
+				for i, toolPath := range tool.Paths(graph) {
+					pushOut(fullPaths[i], toolPath)
+				}
+			}
+		}
+
+		if target.Debug != nil {
+			for _, data := range target.AllDebugData() {
+				fullPaths := data.FullPaths(graph)
+				for i, dataPath := range data.Paths(graph) {
+					pushOut(fullPaths[i], dataPath)
+				}
+			}
+			for _, tool := range target.AllDebugTools() {
+				fullPaths := tool.FullPaths(graph)
+				for i, toolPath := range tool.Paths(graph) {
+					pushOut(fullPaths[i], toolPath)
+				}
+			}
+		}
 		close(ch)
 	}()
 	return ch
@@ -278,7 +299,7 @@ func IterInputPaths(graph *BuildGraph, target *BuildTarget) <-chan string {
 			// the channel to prevent us outputting any intermediate files.
 			for _, source := range target.AllSources() {
 				// If the label is nil add any input paths contained here.
-				if label := source.nonOutputLabel(); label == nil {
+				if label, ok := source.nonOutputLabel(); !ok {
 					for _, sourcePath := range source.FullPaths(graph) {
 						if !donePaths[sourcePath] {
 							ch <- sourcePath
@@ -287,14 +308,17 @@ func IterInputPaths(graph *BuildGraph, target *BuildTarget) <-chan string {
 					}
 					// Otherwise we should recurse for this build label (and gather its sources)
 				} else {
-					inner(graph.TargetOrDie(*label))
+					t := graph.TargetOrDie(label)
+					for _, d := range recursivelyProvideFor(graph, target, t, t.Label) {
+						inner(graph.TargetOrDie(d))
+					}
 				}
 			}
 
 			// Now yield all the data deps of this rule.
 			for _, data := range target.AllData() {
 				// If the label is nil add any input paths contained here.
-				if label := data.Label(); label == nil {
+				if label, ok := data.Label(); !ok {
 					for _, sourcePath := range data.FullPaths(graph) {
 						if !donePaths[sourcePath] {
 							ch <- sourcePath
@@ -303,13 +327,18 @@ func IterInputPaths(graph *BuildGraph, target *BuildTarget) <-chan string {
 					}
 					// Otherwise we should recurse for this build label (and gather its sources)
 				} else {
-					inner(graph.TargetOrDie(*label))
+					t := graph.TargetOrDie(label)
+					for _, d := range recursivelyProvideFor(graph, target, t, t.Label) {
+						inner(graph.TargetOrDie(d))
+					}
 				}
 			}
 
 			// Finally recurse for all the deps of this rule.
 			for _, dep := range target.Dependencies() {
-				inner(dep)
+				for _, d := range recursivelyProvideFor(graph, target, dep, dep.Label) {
+					inner(graph.TargetOrDie(d))
+				}
 			}
 			doneTargets[target] = true
 		}
@@ -332,7 +361,7 @@ func PrepareSource(sourcePath string, tmpPath string) error {
 	if !PathExists(sourcePath) {
 		return fmt.Errorf("Source file %s doesn't exist", sourcePath)
 	}
-	return fs.RecursiveLink(sourcePath, tmpPath, 0)
+	return fs.RecursiveLink(sourcePath, tmpPath)
 }
 
 // PrepareSourcePair prepares a source file for a build.
@@ -341,6 +370,29 @@ func PrepareSourcePair(pair SourcePair) error {
 		return PrepareSource(pair.Src, pair.Tmp)
 	}
 	return PrepareSource(path.Join(RepoRoot, pair.Src), pair.Tmp)
+}
+
+// PrepareRuntimeDir prepares a directory with a target's runtime data for a command to be run on.
+func PrepareRuntimeDir(state *BuildState, target *BuildTarget, dir string) error {
+	if err := fs.ForceRemove(state.ProcessExecutor, dir); err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(dir, fs.DirPermissions); err != nil {
+		return err
+	}
+
+	if err := state.EnsureDownloaded(target); err != nil {
+		return err
+	}
+
+	for out := range IterRuntimeFiles(state.Graph, target, true, dir) {
+		if err := PrepareSourcePair(out); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // CollapseHash combines our usual four-part hash into one by XOR'ing them together.

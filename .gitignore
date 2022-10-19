@@ -12,3 +12,10 @@ __pycache__
 *.iml
 /venv
 /out
+
+.DS_Store
+# For local testing
+.local
+
+# The parse perf test repo
+/tree

@@ -1,39 +1,30 @@
-# TODO(peterebden): Use the following once we fix #1098
-# remote_file(
-#     name = "golangci-lint",
-#     out = "golangci-lint",
-#     binary = True,
-#     extract = True,
-#     hashes = [
-#         "98b1eb7c74766079e1deebc3388c13db9bfa9fa0769046d786cf8d1553d7d68b",
-#         "56b36d1b0a976caf2f49c06e4429aa6021ef0aba13a2e823e063b0605e1dd492",
-#         "6a7c31abca3f51714e5ea1f0aae5dc78d72e7d57d07f02b1a1778219d5648e21",
-#     ],
-#     strip_prefix = "golangci-lint-1.29.0-${OS}-${ARCH}",
-#     url = "https://github.com/golangci/golangci-lint/releases/download/v1.29.0/golangci-lint-1.29.0-%s-%s.tar.gz" % (
-#         CONFIG.OS,
-#         CONFIG.ARCH,
-#     ),
-# )
+GO_CI_LINT_VERSION = "1.45.2"
 
 remote_file(
-    name = "golangci-lint_download",
+    name = "golangci-lint",
+    binary = True,
+    exported_files = ["golangci-lint-%s-${OS}-${ARCH}/golangci-lint" % GO_CI_LINT_VERSION],
+    extract = True,
     hashes = [
-        "98b1eb7c74766079e1deebc3388c13db9bfa9fa0769046d786cf8d1553d7d68b",
-        "56b36d1b0a976caf2f49c06e4429aa6021ef0aba13a2e823e063b0605e1dd492",
-        "6a7c31abca3f51714e5ea1f0aae5dc78d72e7d57d07f02b1a1778219d5648e21",
+        "995e509e895ca6a64ffc7395ac884d5961bdec98423cb896b17f345a9b4a19cf",  # darwin-amd64
+        "c2b9669decc1b638cf2ee9060571af4e255f6dfcbb225c293e3a7ee4bb2c7217",  # darwin-arm64
+        "726cb045559b7518bafdd3459de70a0647c087eb1b4634627a4b2e95b1258580",  # freebsd-amd64
+        "595ad6c6dade4c064351bc309f411703e457f8ffbb7a1806b3d8ee713333427f",  # linux-amd64
+        "1463049b744871168095e3e8f687247d6040eeb895955b869889ea151e0603ab",  # linux-arm64
     ],
-    url = "https://github.com/golangci/golangci-lint/releases/download/v1.29.0/golangci-lint-1.29.0-%s-%s.tar.gz" % (
+    url = "https://github.com/golangci/golangci-lint/releases/download/v%s/golangci-lint-%s-%s-%s.tar.gz" % (
+        GO_CI_LINT_VERSION,
+        GO_CI_LINT_VERSION,
         CONFIG.OS,
         CONFIG.ARCH,
     ),
 )
 
-genrule(
-    name = "golangci-lint",
-    srcs = [":golangci-lint_download"],
-    outs = ["golangci-lint"],
+GO_DEPS_VERSION = "v1.4.1"
+
+# TODO(jpoole): this should support other platforms than just linux_amd64
+remote_file(
+    name = "go-deps",
     binary = True,
-    cmd = "$TOOL x $SRCS --strip_prefix golangci-lint-1.29.0-${OS}-${ARCH}",
-    tools = [CONFIG.JARCAT_TOOL],
+    url = f"https://github.com/Tatskaari/go-deps/releases/download/{GO_DEPS_VERSION}/go_deps_{GO_DEPS_VERSION}_{CONFIG.OS}_{CONFIG.ARCH}",
 )

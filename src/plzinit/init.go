@@ -2,16 +2,14 @@ package plzinit
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
-	"gopkg.in/op/go-logging.v1"
-
 	"github.com/thought-machine/please/src/assets"
 	"github.com/thought-machine/please/src/cli"
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/fs"
 	"github.com/thought-machine/please/src/scm"
@@ -42,7 +40,7 @@ github_repo(
 )
 `
 
-var log = logging.MustGetLogger("init")
+var log = logging.Log
 
 // InitConfig initialises a .plzconfig template in the given directory.
 func InitConfig(dir string, bazelCompatibility bool, noPrompt bool) {
@@ -67,24 +65,20 @@ func InitConfig(dir string, bazelCompatibility bool, noPrompt bool) {
 	if bazelCompatibility {
 		contents += bazelCompatibilityConfig
 	}
-	if !noPrompt {
-		contents += golangConfig(dir)
-	}
 
-	if err := ioutil.WriteFile(config, []byte(contents), 0644); err != nil {
+	contents += golangConfig(dir, noPrompt)
+
+	if err := os.WriteFile(config, []byte(contents), 0644); err != nil {
 		log.Fatalf("Failed to write file: %s", err)
 	}
 	fmt.Printf("Wrote config template to %s, you're now ready to go!\n", config)
 	// Now write the wrapper script
-	data := assets.MustAsset(wrapperScriptName)
-	if err := ioutil.WriteFile(wrapperScriptName, data, 0755); err != nil {
-		log.Fatalf("Failed to write file: %s", err)
-	}
+	InitWrapperScript()
 	fmt.Printf("\nAlso wrote wrapper script to %s; users can invoke that directly to run Please, even without it installed.\n", wrapperScriptName)
 	// If we're in a known repository type, ignore the plz-out directory.
 	if s := scm.New(dir); s != nil {
 		fmt.Printf("Also marking plz-out to be ignored by your SCM.\n")
-		if err := s.IgnoreFile("plz-out"); err != nil {
+		if err := s.IgnoreFiles(".gitignore", nil); err != nil {
 			log.Error("Failed to ignore plz-out: %s", err)
 		}
 	}
@@ -102,7 +96,7 @@ func InitConfigFile(filename string, options map[string]string) {
 	}
 	if err := fs.EnsureDir(filename); err != nil {
 		log.Fatalf("Cannot create directory for new file: %s", err)
-	} else if err := ioutil.WriteFile(filename, b, 0644); err != nil {
+	} else if err := os.WriteFile(filename, b, 0644); err != nil {
 		log.Fatalf("Failed to write updated config file: %s", err)
 	}
 }
@@ -111,9 +105,17 @@ func readConfig(filename string) []byte {
 	if !fs.PathExists(filename) {
 		return nil
 	}
-	b, err := ioutil.ReadFile(filename)
+	b, err := os.ReadFile(filename)
 	if err != nil {
 		log.Fatalf("Failed to read config file: %s", err)
 	}
 	return b
+}
+
+// InitWrapperScript initialises the pleasew script.
+func InitWrapperScript() {
+	data := assets.Pleasew
+	if err := os.WriteFile(wrapperScriptName, data, 0755); err != nil {
+		log.Fatalf("Failed to write file: %s", err)
+	}
 }

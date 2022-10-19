@@ -10,7 +10,7 @@
 # mitigated by having these tests only run tests in this package which are tagged as manual
 # so the bootstrap script won't try to run them twice simultaneously.
 
-subinclude("//build_defs:plz_e2e_test")
+subinclude("//test/build_defs")
 
 # This isn't really needed in this BUILD file, but is intended to avoid race conditions
 # between this and other BUILD files that have the same dependency.
@@ -36,6 +36,13 @@ plz_e2e_test(
     cmd = "plz query somepath //src:please //third_party/java:junit",
     expected_failure = True,
     expected_output = "query_somepath_nopath_test.txt",
+)
+
+plz_e2e_test(
+    name = "query_somepath_hidden_test",
+    cmd = "HIDDEN=$(plz query somepath //tools/build_langserver:build_langserver //tools/build_langserver/lsp:all --hidden | wc -l); \
+           NOTHIDDEN=$(plz query somepath //tools/build_langserver:build_langserver //tools/build_langserver/lsp:all | wc -l); \
+           if [ $HIDDEN > $NOTHIDDEN ]; then exit 0; else exit 1; fi",
 )
 
 # Tests that targets can only use other targets that they depend on.
@@ -144,25 +151,11 @@ filegroup(
     srcs = ["//src:please"],
 )
 
-# Test running a test with no-cache
-plz_e2e_test(
-    name = "test_nocache_test",
-    cmd = "plz test --nocache //test:nocache_test",
-)
-
-gentest(
-    name = "nocache_test",
-    labels = ["manual"],
-    no_test_output = True,
-    test_cmd = "true",
-    deps = ["//src:please"],
-)
-
 # Simulates a code generating rule to test the require / provide mechanism.
 plz_e2e_test(
     name = "require_provide_test",
     cmd = "plz build //test/moar:require_provide_check -v 2 -p",
-    expect_output_doesnt_contain = "//test/moar:test_require",
+    expected_output = "require_provide_test.txt",
 )
 
 # Test for running individual tests
@@ -228,14 +221,20 @@ plz_e2e_test(
 # Tests for query changes.
 plz_e2e_test(
     name = "query_affected_tests_test",
-    cmd = "plz query changes --include_dependees=transitive --include test test/affectedtests_test.go",
+    cmd = "plz query changes --level=-1 --include test test/affectedtests_test.go",
     expected_output = "query_affectedtests_test.txt",
 )
 
 plz_e2e_test(
     name = "query_affected_tests_stdin_test",
-    cmd = "echo test/affectedtests_test.go | plz query changes --include_dependees=transitive --include test -",
+    cmd = "echo test/affectedtests_test.go | plz query changes --level=-1 --include test -",
     expected_output = "query_affectedtests_test.txt",
+)
+
+plz_e2e_test(
+    name = "query_affected_tests_dependees_test",
+    cmd = "plz query changes --include_dependees=transitive --include test test/affectedtests_test.go",
+    expect_output_contains = "//test:affectedtests_test",
 )
 
 go_test(
@@ -331,6 +330,7 @@ plz_e2e_test(
 
 plz_e2e_test(
     name = "cyclic_dependency_test",
+    timeout = 30,
     cmd = "plz test //plz-out/tmp/test/cyclic_dependency_test._test/run_1/test/cycle:all",
     data = ["cycle/TEST_BUILD"],
     expect_output_contains = "Dependency cycle found",
@@ -479,4 +479,24 @@ plz_e2e_test(
     name = "completion_test",
     cmd = "plz --completion_script",
     expect_output_contains = "plz completion",
+)
+
+# This rule being here makes sure than when we parse this file, none of the test fields being set causes a nil pointer
+# even though this target isn't a test.
+build_rule(
+    name = "non_test_target_with_test_fields_set",
+    flaky = 3,
+    labels = ["manual"],
+    no_test_output = True,
+    test = False,
+    test_cmd = "true",
+    test_outputs = ["foo"],
+    test_sandbox = True,
+    test_timeout = 60,
+    test_tools = ["go"],
+)
+
+plz_e2e_test(
+    name = "non_test_target_with_test_fields_set_test",
+    cmd = "plz test //test:non_test_target_with_test_fields_set",
 )

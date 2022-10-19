@@ -1,9 +1,8 @@
-// Package parse implements parsing of the BUILD files via an embedded Python interpreter.
+// Package parse implements handling parse tasks for BUILD files.
 //
-// The actual work here is done by an embedded PyPy instance. Various rules are built in to
-// the binary itself using go-bindata to embed the .py files; these are always available to
-// all programs which is rather nice, but it does mean that must be run before 'go run' etc
-// will work as expected.
+// The actual work to interpret them is done by the //src/parse/asp package; this
+// package handles requests for parsing build targets and triggering them to
+// start building when ready.
 package parse
 
 import (
@@ -11,14 +10,13 @@ import (
 	"path"
 	"strings"
 
-	"gopkg.in/op/go-logging.v1"
-
 	"github.com/thought-machine/please/src/cli"
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/fs"
 )
 
-var log = logging.MustGetLogger("parse")
+var log = logging.Log
 
 // Parse parses the package corresponding to a single build label. The label can be :all to add all targets in a package.
 // It is not an error if the package has already been parsed.
@@ -37,52 +35,74 @@ func Parse(tid int, state *core.BuildState, label, dependent core.BuildLabel, fo
 }
 
 func parse(tid int, state *core.BuildState, label, dependent core.BuildLabel, forSubinclude bool) error {
-	// See if something else has parsed this package first.
-	pkg := state.WaitForPackage(label)
-	if pkg != nil {
-		// Does exist, all we need to do is toggle on this target
-		return activateTarget(tid, state, pkg, label, dependent, forSubinclude)
+	if !forSubinclude {
+		state.Parser.WaitForInit()
 	}
-	// If we get here then it falls to us to parse this package.
-	state.LogBuildResult(tid, label, core.PackageParsing, "Parsing...")
-
-	subrepo, err := checkSubrepo(tid, state, label, dependent)
+	subrepo, err := checkSubrepo(tid, state, label, dependent, forSubinclude)
 	if err != nil {
 		return err
-	} else if subrepo != nil && subrepo.Target != nil {
-		// We have got the definition of the subrepo but it depends on something, make sure that has been built.
-		state.WaitForBuiltTarget(subrepo.Target.Label, label)
 	}
+
+	// See if something else has parsed this package first.
+	pkg := state.SyncParsePackage(label)
+	if pkg != nil {
+		// Does exist, all we need to do is toggle on this target
+		return activateTarget(state, pkg, label, dependent, forSubinclude)
+	}
+	// If we get here then it falls to us to parse this package.
+	state.LogParseResult(tid, label, core.PackageParsing, "Parsing...")
+
+	if subrepo != nil && subrepo.Target != nil {
+		// We have got the definition of the subrepo but it depends on something, make sure that has been built.
+		state.WaitForTargetAndEnsureDownload(subrepo.Target.Label, label)
+		if err := subrepo.LoadSubrepoConfig(); err != nil {
+			return err
+		}
+	}
+
+	if subrepo != nil {
+		state = subrepo.State
+		if !forSubinclude {
+			state.Parser.WaitForInit()
+		}
+	}
+
 	// Subrepo & nothing else means we just want to ensure that subrepo is present.
 	if label.Subrepo != "" && label.PackageName == "" && label.Name == "" {
 		return nil
 	}
-	if state.Config.FeatureFlags.RemovePleasings {
-		pkg, err = parsePackage(state, label, dependent, subrepo)
-	} else {
-		pkg, err = parsePackageWithPleasings(state, label, dependent, subrepo)
-	}
+	pkg, err = parsePackage(state, label, dependent, subrepo)
+
 	if err != nil {
 		return err
 	}
-	state.LogBuildResult(tid, label, core.PackageParsed, "Parsed package")
-	return activateTarget(tid, state, pkg, label, dependent, forSubinclude)
+	state.LogParseResult(tid, label, core.PackageParsed, "Parsed package")
+	return activateTarget(state, pkg, label, dependent, forSubinclude)
 }
 
 // checkSubrepo checks whether this guy exists within a subrepo. If so we will need to make sure that's available first.
-func checkSubrepo(tid int, state *core.BuildState, label, dependent core.BuildLabel) (*core.Subrepo, error) {
+func checkSubrepo(tid int, state *core.BuildState, label, dependent core.BuildLabel, forSubinclude bool) (*core.Subrepo, error) {
 	if label.Subrepo == "" {
 		return nil, nil
 	} else if subrepo := state.Graph.Subrepo(label.Subrepo); subrepo != nil {
 		return subrepo, nil
 	}
-	// We don't have the definition of it at all. Need to parse that first.
-	sl := label.SubrepoLabel()
-	if handled, err := parseSubrepoPackage(tid, state, sl.PackageName, "", label); err != nil {
-		return nil, err
-	} else if !handled {
-		if _, err := parseSubrepoPackage(tid, state, sl.PackageName, dependent.Subrepo, label); err != nil {
+
+	sl := label.SubrepoLabel(state, dependent.Subrepo)
+
+	// Local subincludes are when we subinclude from a subrepo defined in the current package
+	localSubinclude := label.Subrepo == dependent.Subrepo && label.PackageName == dependent.PackageName && forSubinclude
+
+	// If we're including from the same package, we don't want to parse the subrepo package
+	if !localSubinclude {
+		if handled, err := parseSubrepoPackage(tid, state, sl.PackageName, "", label); err != nil {
 			return nil, err
+		} else if !handled {
+			// They may have meant a subrepo that was defined in the dependent label's subrepo rather than the host
+			// repo
+			if _, err := parseSubrepoPackage(tid, state, sl.PackageName, dependent.Subrepo, label); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if subrepo := state.Graph.Subrepo(label.Subrepo); subrepo != nil {
@@ -90,11 +110,15 @@ func checkSubrepo(tid int, state *core.BuildState, label, dependent core.BuildLa
 	} else if subrepo := checkArchSubrepo(state, label.Subrepo); subrepo != nil {
 		return subrepo, nil
 	}
-	// Fix for #577; fallback like above, it might be defined within the subrepo.
-	if handled, err := parseSubrepoPackage(tid, state, sl.PackageName, dependent.Subrepo, label); handled && err == nil {
-		return state.Graph.Subrepo(label.Subrepo), nil
+	if !localSubinclude {
+		// Fix for #577; fallback like above, it might be defined within the subrepo.
+		if handled, err := parseSubrepoPackage(tid, state, sl.PackageName, dependent.Subrepo, label); handled && err == nil {
+			return state.Graph.Subrepo(label.Subrepo), nil
+		}
+		return nil, fmt.Errorf("Subrepo %s is not defined (referenced by %s)", label.Subrepo, dependent)
 	}
-	return nil, fmt.Errorf("Subrepo %s is not defined (referenced by %s)", label.Subrepo, dependent)
+	// For local subincludes, the subrepo has to already be defined at this point in the BUILD file
+	return nil, fmt.Errorf("Subrepo %v is not defined yet. It must appear before it is used by subinclude()", sl)
 }
 
 // parseSubrepoPackage parses a package to make sure subrepos are available.
@@ -118,11 +142,11 @@ func checkArchSubrepo(state *core.BuildState, name string) *core.Subrepo {
 }
 
 // activateTarget marks a target as active (ie. to be built) and adds its dependencies as pending parses.
-func activateTarget(tid int, state *core.BuildState, pkg *core.Package, label, dependent core.BuildLabel, forSubinclude bool) error {
+func activateTarget(state *core.BuildState, pkg *core.Package, label, dependent core.BuildLabel, forSubinclude bool) error {
 	if !label.IsAllTargets() && state.Graph.Target(label) == nil {
 		if label.Subrepo == "" && label.PackageName == "" && label.Name == dependent.Subrepo {
 			if subrepo := checkArchSubrepo(state, label.Name); subrepo != nil {
-				state.LogBuildResult(tid, label, core.TargetBuilt, "Instantiated subrepo")
+				state.ArchSubrepoInitialised(label)
 				return nil
 			}
 		}
@@ -149,8 +173,8 @@ func activateTarget(tid int, state *core.BuildState, pkg *core.Package, label, d
 				if state.ShouldInclude(target) && !target.AddedPostBuild {
 					// Must always do this for coverage because we need to calculate sources of
 					// non-test targets later on.
-					if !state.NeedTests || target.IsTest || state.NeedCoverage {
-						if err := state.QueueTarget(target.Label, dependent, false, dependent.IsAllTargets()); err != nil {
+					if !state.NeedTests || target.IsTest() || state.NeedCoverage {
+						if err := state.QueueTarget(target.Label, dependent, dependent.IsAllTargets()); err != nil {
 							return err
 						}
 					}
@@ -160,7 +184,7 @@ func activateTarget(tid int, state *core.BuildState, pkg *core.Package, label, d
 	} else {
 		for _, l := range state.Graph.DependentTargets(dependent, label) {
 			// We use :all to indicate a dependency needed for parse.
-			if err := state.QueueTarget(l, dependent, false, forSubinclude || dependent.IsAllTargets()); err != nil {
+			if err := state.QueueTarget(l, dependent, forSubinclude || dependent.IsAllTargets()); err != nil {
 				return err
 			}
 		}
@@ -168,7 +192,7 @@ func activateTarget(tid int, state *core.BuildState, pkg *core.Package, label, d
 	return nil
 }
 
-// parsePackage performs the initial parse of a package.
+// parsePackage parses a BUILD file and adds the package to the build graph
 func parsePackage(state *core.BuildState, label, dependent core.BuildLabel, subrepo *core.Subrepo) (*core.Package, error) {
 	packageName := label.PackageName
 	pkg := core.NewPackage(packageName)
@@ -176,72 +200,44 @@ func parsePackage(state *core.BuildState, label, dependent core.BuildLabel, subr
 	if subrepo != nil {
 		pkg.SubrepoName = subrepo.Name
 	}
-	filename, dir := buildFileName(state, label.PackageName, subrepo)
-	if filename == "" {
-		exists := core.PathExists(dir)
-		// Handle quite a few cases to provide more obvious error messages.
-		if dependent != core.OriginalTarget && exists {
-			return nil, fmt.Errorf("%s depends on %s, but there's no %s file in %s/", dependent, label, buildFileNames(state.Config.Parse.BuildFileName), dir)
-		} else if dependent != core.OriginalTarget {
-			return nil, fmt.Errorf("%s depends on %s, but the directory %s doesn't exist", dependent, label, dir)
-		} else if exists {
-			return nil, fmt.Errorf("Can't build %s; there's no %s file in %s/", label, buildFileNames(state.Config.Parse.BuildFileName), dir)
+	// Only load the internal package for the host repo's state
+	if state.ParentState == nil && packageName == InternalPackageName {
+		pkgStr, err := GetInternalPackage(state.Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate internal package: %w", err)
 		}
-		return nil, fmt.Errorf("Can't build %s; the directory %s doesn't exist", label, dir)
-	}
-	pkg.Filename = filename
-	if err := state.Parser.ParseFile(state, pkg, pkg.Filename); err != nil {
-		return nil, err
-	}
-
-	// Verify some details of the output files in the background. Don't need to wait for this
-	// since it only issues warnings sometimes.
-	go pkg.VerifyOutputs()
-	state.Graph.AddPackage(pkg) // Calling this means nobody else will add entries to pendingTargets for this package.
-	return pkg, nil
-}
-
-// TODO(jpoole): delete this code branch in the v16 release
-// parsePackageWithPleasings does the same as parse package but includes the default pleasings subrepo
-func parsePackageWithPleasings(state *core.BuildState, label, dependent core.BuildLabel, subrepo *core.Subrepo) (*core.Package, error) {
-	packageName := label.PackageName
-	pkg := core.NewPackage(packageName)
-	pkg.Subrepo = subrepo
-	if subrepo != nil {
-		pkg.SubrepoName = subrepo.Name
-	}
-	filename, dir := buildFileName(state, label.PackageName, subrepo)
-	if filename == "" {
-		if packageName == "" && dependent.Subrepo == "pleasings" && subrepo == nil && state.Config.Parse.BuiltinPleasings {
-			// Deliberate fallthrough, for the case where someone depended on the default
-			// @pleasings subrepo, and there is no BUILD file at their root.
+		if err := state.Parser.ParseReader(pkg, strings.NewReader(pkgStr)); err != nil {
+			return nil, fmt.Errorf("failed to parse internal package: %w", err)
+		}
+	} else {
+		filename, dir := buildFileName(state, label.PackageName, subrepo)
+		if filename != "" {
+			pkg.Filename = filename
+			if err := state.Parser.ParseFile(pkg, pkg.Filename); err != nil {
+				return nil, err
+			}
 		} else {
 			exists := core.PathExists(dir)
 			// Handle quite a few cases to provide more obvious error messages.
 			if dependent != core.OriginalTarget && exists {
 				return nil, fmt.Errorf("%s depends on %s, but there's no %s file in %s/", dependent, label, buildFileNames(state.Config.Parse.BuildFileName), dir)
 			} else if dependent != core.OriginalTarget {
-				return nil, fmt.Errorf("%s depends on %s, but the directory %s doesn't exist", dependent, label, dir)
+				return nil, fmt.Errorf("%s depends on %s, but the directory %s doesn't exist: %s", dependent, label, dir, packageName)
 			} else if exists {
 				return nil, fmt.Errorf("Can't build %s; there's no %s file in %s/", label, buildFileNames(state.Config.Parse.BuildFileName), dir)
 			}
 			return nil, fmt.Errorf("Can't build %s; the directory %s doesn't exist", label, dir)
 		}
+	}
+
+	// Verifies some details of the output files. This can only be perfomed after the whole package has been parsed as
+	// it guarantees that all necessary information between targets has been retrieved.
+	if state.Config.FeatureFlags.PackageOutputsStrictness {
+		go pkg.MustVerifyOutputs()
 	} else {
-		pkg.Filename = filename
-		if err := state.Parser.ParseFile(state, pkg, pkg.Filename); err != nil {
-			return nil, err
-		}
+		go pkg.VerifyOutputs()
 	}
-	// If the config setting is on, we "magically" register a default repo called @pleasings.
-	if packageName == "" && subrepo == nil && state.Config.Parse.BuiltinPleasings && pkg.Target("pleasings") == nil {
-		if _, err := state.Parser.(*aspParser).asp.ParseReader(pkg, strings.NewReader(pleasings)); err != nil {
-			log.Fatalf("Failed to load pleasings: %s", err) // This shouldn't happen, of course.
-		}
-	}
-	// Verify some details of the output files in the background. Don't need to wait for this
-	// since it only issues warnings sometimes.
-	go pkg.VerifyOutputs()
+
 	state.Graph.AddPackage(pkg) // Calling this means nobody else will add entries to pendingTargets for this package.
 	return pkg, nil
 }
@@ -261,40 +257,12 @@ func buildFileName(state *core.BuildState, pkgName string, subrepo *core.Subrepo
 		return "WORKSPACE", ""
 	}
 	for _, buildFileName := range config.Parse.BuildFileName {
-		if filename := path.Join(core.RepoRoot, pkgName, buildFileName); fs.FileExists(filename) {
+		if filename := path.Join(pkgName, buildFileName); fs.FileExists(filename) {
 			return filename, pkgName
 		}
 	}
 	return "", pkgName
 }
-
-func rescanDeps(state *core.BuildState, changed map[*core.BuildTarget]struct{}) error {
-	// Run over all the changed targets in this package and ensure that any newly added dependencies enter the build queue.
-	for target := range changed {
-		if !state.Graph.AllDependenciesResolved(target) {
-			for _, dep := range target.DeclaredDependencies() {
-				state.Graph.AddDependency(target.Label, dep)
-			}
-		}
-		if s := target.State(); s < core.Built && s > core.Inactive {
-			if err := state.QueueTarget(target.Label, core.OriginalTarget, true, false); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// This is the builtin subrepo for pleasings.
-// TODO(peterebden): Should really provide a github_archive builtin that knows how to construct
-//                   the URL and strip_prefix etc.
-const pleasings = `
-http_archive(
-    name = "pleasings",
-    strip_prefix = "pleasings-master",
-    urls = ["https://github.com/thought-machine/pleasings/archive/master.zip"],
-)
-`
 
 // exportFile adds a single-file export target. This is primarily used for Bazel compat.
 func exportFile(state *core.BuildState, pkg *core.Package, label core.BuildLabel) {

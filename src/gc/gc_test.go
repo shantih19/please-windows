@@ -61,7 +61,6 @@ func createTarget(graph *core.BuildGraph, name string, deps ...string) *core.Bui
 	for _, dep := range deps {
 		label := bl(dep)
 		target.AddDependency(label)
-		graph.AddDependency(target.Label, label)
 	}
 	return target
 }
@@ -69,7 +68,7 @@ func createTarget(graph *core.BuildGraph, name string, deps ...string) *core.Bui
 func createTest(graph *core.BuildGraph, name string, deps ...string) *core.BuildTarget {
 	target := createTarget(graph, name, deps...)
 	target.IsBinary = true
-	target.IsTest = true
+	target.Test = new(core.TestFields)
 	return target
 }
 

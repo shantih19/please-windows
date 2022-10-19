@@ -10,12 +10,13 @@ go_library(
     deps = [
         "//src/build",
         "//src/cli",
+        "//src/cli/logging",
         "//src/core",
         "//src/fs",
-        "//src/utils",
+        "//src/process",
         "//src/worker",
         "//third_party/go:cover",
-        "//third_party/go:logging",
+        "//third_party/go:deferred_regex",
     ],
 )
 

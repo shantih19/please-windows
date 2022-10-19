@@ -8,10 +8,12 @@ go_library(
     deps = [
         "//src/build",
         "//src/cli",
+        "//src/cli/logging",
         "//src/core",
+        "//src/fs",
+        "//src/parse",
         "//src/scm",
-        "//src/utils",
-        "//third_party/go:logging",
+        "//third_party/go:gcfg",
     ],
 )
 
@@ -21,6 +23,7 @@ go_test(
     deps = [
         ":query",
         "//src/core",
+        "//src/parse",
         "//third_party/go:testify",
     ],
 )
@@ -46,6 +49,16 @@ go_test(
 )
 
 go_test(
+    name = "whatinputs_test",
+    srcs = ["whatinputs_test.go"],
+    deps = [
+        ":query",
+        "//src/core",
+        "//third_party/go:testify",
+    ],
+)
+
+go_test(
     name = "changes_test",
     srcs = ["changes_test.go"],
     deps = [
@@ -58,6 +71,17 @@ go_test(
 go_test(
     name = "reverse_deps_test",
     srcs = ["reverse_deps_test.go"],
+    deps = [
+        ":query",
+        "//src/core",
+        "//third_party/go:testify",
+    ],
+)
+
+go_test(
+    name = "completions_test",
+    srcs = ["completions_test.go"],
+    data = ["completions_test_repo"],
     deps = [
         ":query",
         "//src/core",

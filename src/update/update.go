@@ -11,12 +11,12 @@ package update
 import (
 	"archive/tar"
 	"bufio"
-	"compress/gzip"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -25,20 +25,27 @@ import (
 	"github.com/coreos/go-semver/semver"
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/ulikunitz/xz"
-	"gopkg.in/op/go-logging.v1"
 
 	"github.com/thought-machine/please/src/cli"
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/fs"
 	"github.com/thought-machine/please/src/process"
 )
 
-var log = logging.MustGetLogger("update")
+var log = logging.Log
 
 // minSignedVersion is the earliest version of Please that has a signature.
 var minSignedVersion = semver.Version{Major: 9, Minor: 2}
 
 var httpClient *retryablehttp.Client
+
+const milestoneURL = "https://please.build/milestones"
+
+// pleaseVersion returns the current version of Please as a semver.
+func pleaseVersion() semver.Version {
+	return *semver.New(core.PleaseVersion)
+}
 
 // CheckAndUpdate checks whether we should update Please and does so if needed.
 // If it requires an update it will never return, it will either die on failure or on success will exec the new Please.
@@ -47,33 +54,39 @@ var httpClient *retryablehttp.Client
 // updateCommand indicates whether an update is specifically requested (due to e.g. `plz update`)
 // forceUpdate indicates whether the user passed --force on the command line, in which case we
 // will always update even if the version exists.
-func CheckAndUpdate(config *core.Configuration, updatesEnabled, updateCommand, forceUpdate, verify bool, progress bool) {
-	if !shouldUpdate(config, updatesEnabled, updateCommand) && !forceUpdate {
+func CheckAndUpdate(config *core.Configuration, updatesEnabled, updateCommand, forceUpdate, verify, progress, prerelease bool) {
+	httpClient = retryablehttp.NewClient()
+	httpClient.Logger = &cli.HTTPLogWrapper{Log: log}
+
+	if !shouldUpdate(config, updatesEnabled, updateCommand, prerelease) && !forceUpdate {
 		clean(config, updateCommand)
 		return
 	}
-	word := describe(config.Please.Version.Semver(), core.PleaseVersion, true)
+	word := describe(config.Please.Version.Semver(), pleaseVersion(), true)
 	if !updateCommand {
-		log.Warning("%s to Please version %s (currently %s)", word, config.Please.Version.VersionString(), core.PleaseVersion)
+		fmt.Fprintf(os.Stderr, "%s Please from version %s to %s\n", word, pleaseVersion(), config.Please.Version.VersionString())
 	}
 
-	// Must lock here so that the update process doesn't race when running two instances
-	// simultaneously.
-	core.AcquireRepoLock(nil)
-	defer core.ReleaseRepoLock()
+	if core.RepoRoot != "" {
+		// Must lock exclusively here so that the update process doesn't race when running two instances simultaneously.
+		// Once we are done we replace/restore the mode to the shared one.
+		core.AcquireExclusiveRepoLock()
+		defer core.AcquireSharedRepoLock()
+	}
 
 	// If the destination exists and the user passed --force, remove it to force a redownload.
-	newDir := fs.ExpandHomePath(path.Join(config.Please.Location, config.Please.Version.VersionString()))
+	newDir := path.Join(config.Please.Location, config.Please.Version.VersionString())
 	if forceUpdate && core.PathExists(newDir) {
 		if err := os.RemoveAll(newDir); err != nil {
 			log.Fatalf("Failed to remove existing directory: %s", err)
 		}
 	}
 
-	httpClient = retryablehttp.NewClient()
-
 	// Download it.
 	newPlease := downloadAndLinkPlease(config, verify, progress)
+
+	// Print update milestone message if we hit a milestone
+	printMilestoneMessage(config.Please.Version.VersionString())
 
 	// Clean out any old ones
 	clean(config, updateCommand)
@@ -89,22 +102,67 @@ func CheckAndUpdate(config *core.Configuration, updatesEnabled, updateCommand, f
 	panic("please update failed in an an unexpected and exciting way")
 }
 
+func printMilestoneMessage(pleaseVersion string) {
+	milestoneURL := fmt.Sprintf("%s/%s.html", milestoneURL, pleaseVersion)
+	resp, err := httpClient.Head(milestoneURL)
+	if err != nil {
+		log.Warningf("Failed to check for milestone update: %v", err)
+		return
+	}
+
+	defer resp.Body.Close()
+
+	border := "+-----------------------------------------------------------------------------------------------------+"
+
+	// Prints `| {line} |` center aligning the text to match the width of the border above
+	printLn := func(line string, args ...interface{}) {
+		line = fmt.Sprintf(line, args...)
+		targetWidth := len(border) - 2 // -2 for the | on each side
+		padLen := len(line) + (targetWidth-len(line))/2
+
+		// Prints the string ensuring it's the target width
+		fmtString := "|%-" + fmt.Sprint(targetWidth) + "s|\n"
+
+		// Left pad the string so it's center aligned
+		paddedString := fmt.Sprintf("%"+fmt.Sprint(padLen)+"s", line)
+
+		fmt.Fprintf(os.Stderr, fmtString, paddedString)
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		fmt.Fprintf(os.Stderr, "%s\n", border)
+		printLn("")
+		printLn("You've successfully updated to Please v%v", pleaseVersion)
+		printLn("This release marks an exciting milestone in Please's development!")
+		printLn("Read all about it here: %v#cli", milestoneURL)
+		printLn("")
+		fmt.Fprintf(os.Stderr, "%s\n", border)
+		return
+	}
+
+	// If we get a 40x resp back, assume there's no milestone release. Cloudfront gives 403s rather than 404s.
+	if !(resp.StatusCode >= 400 && resp.StatusCode < 500) {
+		body, _ := io.ReadAll(resp.Body)
+		log.Warningf("Got unexpected error code from %v: %v\n %v", milestoneURL, resp.StatusCode, string(body))
+	}
+}
+
 // shouldUpdate determines whether we should run an update or not. It returns true iff one is required.
-func shouldUpdate(config *core.Configuration, updatesEnabled, updateCommand bool) bool {
-	if config.Please.Version.Semver() == core.PleaseVersion {
+func shouldUpdate(config *core.Configuration, updatesEnabled, updateCommand, prerelease bool) bool {
+	if config.Please.Version.Semver() == pleaseVersion() {
 		return false // Version matches, nothing to do here.
-	} else if config.Please.Version.IsGTE && config.Please.Version.LessThan(core.PleaseVersion) {
+	} else if config.Please.Version.IsGTE && config.Please.Version.LessThan(pleaseVersion()) {
 		if !updateCommand {
 			return false // Version specified is >= and we are above it, nothing to do unless it's `plz update`
 		}
 		// Find the latest available version. Update if it's newer than the current one.
-		config.Please.Version = *findLatestVersion(config.Please.DownloadLocation.String())
-		return config.Please.Version.Semver() != core.PleaseVersion
+		config.Please.Version = findLatestVersion(config.Please.DownloadLocation.String(), prerelease)
+		return config.Please.Version.Semver() != pleaseVersion()
 	} else if (!updatesEnabled || !config.Please.SelfUpdate) && !updateCommand {
 		// Update is required but has been skipped (--noupdate or whatever)
 		if config.Please.Version.Major != 0 {
-			word := describe(config.Please.Version.Semver(), core.PleaseVersion, true)
-			log.Warning("%s to Please version %s skipped (current version: %s)", word, config.Please.Version, core.PleaseVersion)
+			word := describe(config.Please.Version.Semver(), pleaseVersion(), true)
+			log.Warning("%s to Please version %s skipped (current version: %s)", word, config.Please.Version, pleaseVersion())
 		}
 		return false
 	} else if config.Please.Location == "" {
@@ -117,11 +175,11 @@ func shouldUpdate(config *core.Configuration, updatesEnabled, updateCommand bool
 	if config.Please.Version.Major == 0 {
 		// Specific version isn't set, only update on `plz update`.
 		if !updateCommand {
-			config.Please.Version.Set(core.PleaseVersion.String())
+			config.Please.Version.Set(core.PleaseVersion)
 			return false
 		}
-		config.Please.Version = *findLatestVersion(config.Please.DownloadLocation.String())
-		return shouldUpdate(config, updatesEnabled, updateCommand)
+		config.Please.Version = findLatestVersion(config.Please.DownloadLocation.String(), prerelease)
+		return shouldUpdate(config, updatesEnabled, updateCommand, prerelease)
 	}
 	return true
 }
@@ -129,7 +187,6 @@ func shouldUpdate(config *core.Configuration, updatesEnabled, updateCommand bool
 // downloadAndLinkPlease downloads a new Please version and links it into place, if needed.
 // It returns the new location and dies on failure.
 func downloadAndLinkPlease(config *core.Configuration, verify bool, progress bool) string {
-	config.Please.Location = fs.ExpandHomePath(config.Please.Location)
 	newPlease := path.Join(config.Please.Location, config.Please.Version.VersionString(), "please")
 
 	if !core.PathExists(newPlease) {
@@ -168,12 +225,12 @@ func downloadPlease(config *core.Configuration, verify bool, progress bool) {
 	}
 
 	url := strings.TrimSuffix(config.Please.DownloadLocation.String(), "/")
-	ext := "gz"
-	if shouldUseXZ(config.Please.Version) {
-		ext = "xz"
+	ext := ""
+	if shouldDownloadFullDist(config.Please.Version) {
+		ext = ".tar.xz"
 	}
 	v := config.Please.Version.VersionString()
-	url = fmt.Sprintf("%s/%s_%s/%s/please_%s.tar.%s", url, runtime.GOOS, runtime.GOARCH, v, v, ext)
+	url = fmt.Sprintf("%s/%s_%s/%s/please_%s%s", url, runtime.GOOS, runtime.GOARCH, v, v, ext)
 	rc := mustDownload(url, progress)
 	defer mustClose(rc)
 	var r io.Reader = bufio.NewReader(rc)
@@ -190,19 +247,29 @@ func downloadPlease(config *core.Configuration, verify bool, progress bool) {
 		log.Warning("Signature verification disabled for %s", url)
 	}
 
-	if shouldUseXZ(config.Please.Version) {
+	if shouldDownloadFullDist(config.Please.Version) {
 		xzr, err := xz.NewReader(r)
 		if err != nil {
 			panic(fmt.Sprintf("%s isn't a valid xzip file: %s", url, err))
 		}
 		copyTarFile(xzr, newDir, url)
 	} else {
-		gzreader, err := gzip.NewReader(r)
-		if err != nil {
-			panic(fmt.Sprintf("%s isn't a valid gzip file: %s", url, err))
-		}
-		defer mustClose(gzreader)
-		copyTarFile(gzreader, newDir, url)
+		copyFile(r, newDir)
+	}
+}
+
+func copyFile(r io.Reader, newDir string) {
+	if err := os.MkdirAll(newDir, fs.DirPermissions); err != nil {
+		panic(err)
+	}
+	f, err := os.OpenFile(filepath.Join(newDir, "please"), os.O_RDWR|os.O_CREATE, 0555)
+	if err != nil {
+		panic(err)
+	}
+
+	defer f.Close()
+	if _, err := io.Copy(f, r); err != nil {
+		panic(err)
 	}
 }
 
@@ -238,7 +305,7 @@ func mustDownload(url string, progress bool) io.ReadCloser {
 }
 
 func linkNewPlease(config *core.Configuration) {
-	if files, err := ioutil.ReadDir(path.Join(config.Please.Location, config.Please.Version.VersionString())); err != nil {
+	if files, err := os.ReadDir(path.Join(config.Please.Location, config.Please.Version.VersionString())); err != nil {
 		log.Fatalf("Failed to read directory: %s", err)
 	} else {
 		for _, file := range files {
@@ -275,15 +342,18 @@ func cleanDir(newDir string) {
 }
 
 // findLatestVersion attempts to find the latest available version of plz.
-func findLatestVersion(downloadLocation string) *cli.Version {
+func findLatestVersion(downloadLocation string, prerelease bool) cli.Version {
 	url := strings.TrimRight(downloadLocation, "/") + "/latest_version"
+	if prerelease {
+		url = strings.TrimRight(downloadLocation, "/") + "/latest_prerelease_version"
+	}
 	response := mustDownload(url, false)
 	defer response.Close()
-	data, err := ioutil.ReadAll(response)
+	data, err := io.ReadAll(response)
 	if err != nil {
 		log.Fatalf("Failed to find latest plz version: %s", err)
 	}
-	return cli.MustNewVersion(strings.TrimSpace(string(data)))
+	return *cli.MustNewVersion(strings.TrimSpace(string(data)))
 }
 
 // describe returns a word describing the process we're about to do ("update", "downgrading", etc)
@@ -354,11 +424,13 @@ func filterArgs(forceUpdate bool, args []string) []string {
 	return ret
 }
 
-// shouldUseXZ returns true if attempting to download the given version should use xzip compression.
-func shouldUseXZ(version cli.Version) bool {
-	return !version.LessThan(semver.Version{
-		Major:      13,
-		Minor:      2,
+// shouldDownloadFullDist returns true if for that version of Please we need to download the tar
+// with please and it's tools
+func shouldDownloadFullDist(version cli.Version) bool {
+	downloadToolsVersion := semver.Version{
+		Major:      16,
+		Minor:      0,
 		PreRelease: "0", // Less than any valid prerelease string, e.g. alpha1
-	})
+	}
+	return version.LessThan(downloadToolsVersion)
 }

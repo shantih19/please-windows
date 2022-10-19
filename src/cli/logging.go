@@ -12,24 +12,26 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/peterebden/go-cli-init"
-	"golang.org/x/crypto/ssh/terminal"
+	cli "github.com/peterebden/go-cli-init/v5/logging"
+	"github.com/peterebden/go-deferred-regex"
+	"golang.org/x/term"
 	"gopkg.in/op/go-logging.v1"
+
+	logger "github.com/thought-machine/please/src/cli/logging"
 )
 
-var log = logging.MustGetLogger("cli")
+const messageHistoryMaxSize = 100
+
+var log = logger.Log
 
 // StdErrIsATerminal is true if the process' stderr is an interactive TTY.
-var StdErrIsATerminal = terminal.IsTerminal(int(os.Stderr.Fd()))
-
-// StdOutIsATerminal is true if the process' stdout is an interactive TTY.
-var StdOutIsATerminal = terminal.IsTerminal(int(os.Stdout.Fd()))
+var StdErrIsATerminal = IsATerminal(os.Stderr)
 
 // ShowColouredOutput tracks whether we are displaying coloured output or not.
 var ShowColouredOutput = StdErrIsATerminal
 
 // StripAnsi is a regex to find & replace ANSI console escape sequences.
-var StripAnsi = regexp.MustCompile("\x1b[^m]+m")
+var StripAnsi = deferredregex.DeferredRegex{Re: "\x1b[^m]+m"}
 
 // logLevel is the current verbosity level that is set.
 var logLevel = logging.WARNING
@@ -41,7 +43,14 @@ var fileBackend logging.Backend
 type Verbosity = cli.Verbosity
 
 // CurrentBackend is the current interactive logging backend.
-var CurrentBackend *LogBackend
+var CurrentBackend = &LogBackend{
+	interactiveRows: 10,
+	maxRecords:      10,
+	logMessages:     list.New(),
+	messageHistory:  list.New(),
+	formatter:       logFormatter(StdErrIsATerminal),
+	passthrough:     true,
+}
 
 // InitLogging initialises logging backends.
 func InitLogging(verbosity Verbosity) {
@@ -84,12 +93,19 @@ func logFormatter(coloured bool) logging.Formatter {
 func setLogBackend(backend logging.Backend) {
 	backend = logging.NewBackendFormatter(backend, logFormatter(StdErrIsATerminal))
 	if fileBackend == nil {
-		logging.SetBackend(newLogBackend(backend))
+		log.SetBackend(newLogBackend(backend))
 	} else {
 		fileBackendLeveled := logging.AddModuleLevel(fileBackend)
 		fileBackendLeveled.SetLevel(fileLogLevel, "")
-		logging.SetBackend(newLogBackend(backend), fileBackendLeveled)
+		log.SetBackend(logging.AddModuleLevel(multiBackend(newLogBackend(backend), fileBackendLeveled)))
 	}
+}
+
+func multiBackend(backends ...logging.Backend) logging.Backend {
+	if len(backends) == 1 {
+		return backends[0]
+	}
+	return logging.MultiLogger(backends...)
 }
 
 type logBackendFacade struct {
@@ -102,12 +118,14 @@ func (backend logBackendFacade) Log(level logging.Level, calldepth int, rec *log
 
 // LogBackend is the backend we use for logging during the interactive console display.
 type LogBackend struct {
-	mutex                                                                 sync.Mutex
-	rows, cols, maxRecords, interactiveRows, maxInteractiveRows, maxLines int
-	output                                                                []string
 	logMessages                                                           *list.List
+	messageHistory                                                        *list.List
 	formatter                                                             logging.Formatter
 	origBackend                                                           logging.Backend
+	output                                                                []string
+	mutex                                                                 sync.Mutex
+	rows, cols, maxRecords, interactiveRows, maxInteractiveRows, maxLines int
+	messageCount                                                          int
 	passthrough                                                           bool
 }
 
@@ -121,7 +139,15 @@ func (backend *LogBackend) Log(level logging.Level, calldepth int, rec *logging.
 	}
 	var b bytes.Buffer
 	backend.formatter.Format(calldepth, rec, &b)
-	backend.logMessages.PushBack(strings.TrimSpace(b.String()))
+	msg := strings.TrimSpace(b.String())
+	backend.logMessages.PushBack(msg)
+
+	// Add the messages to the history so we may output them again after the build has finished
+	if backend.messageCount < messageHistoryMaxSize {
+		backend.messageHistory.PushBack(msg)
+	}
+	backend.messageCount++
+
 	backend.RecalcLines()
 	return nil
 }
@@ -143,16 +169,8 @@ func (backend *LogBackend) RecalcLines() {
 
 // newLogBackend constructs a new logging backend.
 func newLogBackend(origBackend logging.Backend) logging.LeveledBackend {
-	b := &LogBackend{
-		interactiveRows: 10,
-		maxRecords:      10,
-		logMessages:     list.New(),
-		formatter:       logFormatter(StdErrIsATerminal),
-		origBackend:     origBackend,
-		passthrough:     true,
-	}
-	CurrentBackend = b
-	l := logging.AddModuleLevel(logBackendFacade{realBackend: b})
+	CurrentBackend.origBackend = origBackend
+	l := logging.AddModuleLevel(logBackendFacade{realBackend: CurrentBackend})
 	l.SetLevel(logLevel, "")
 	return l
 }
@@ -171,12 +189,30 @@ func (backend *LogBackend) calcOutput() []string {
 	return reverse(ret)
 }
 
+// GetMessageHistory returns the history of log messages. The message history is limited to messageHistoryMaxSize so
+// this method returns the total amount of messages logged and the amount actually retained as well.
+func (backend *LogBackend) GetMessageHistory() ([]string, int, int) {
+	ret := make([]string, 0, backend.messageHistory.Len())
+	for e := backend.messageHistory.Front(); e != nil; e = e.Next() {
+		msg := reverse(backend.lineWrap(e.Value.(string)))
+		ret = append(ret, msg...)
+	}
+	if backend.messageCount > messageHistoryMaxSize {
+		return ret, backend.messageCount, messageHistoryMaxSize
+	}
+	return ret, backend.messageCount, backend.messageCount
+}
+
 // SetPassthrough sets whether we are "passing through" log messages or not, i.e. whether they go straight to
 // the normal log output or are stored in here.
-func (backend *LogBackend) SetPassthrough(passthrough bool, interactiveRows int) {
+func (backend *LogBackend) SetPassthrough(passthrough bool, interactiveRows int, clearMessageHistory bool) {
 	backend.mutex.Lock()
 	backend.passthrough = passthrough
 	backend.interactiveRows = interactiveRows
+	if clearMessageHistory {
+		backend.messageHistory = list.New()
+		backend.messageCount = 0
+	}
 	backend.mutex.Unlock()
 	if passthrough {
 		go notifyOnWindowResize(backend.recalcWindowSize)
@@ -242,9 +278,38 @@ func findSplit(line string, guess int) int {
 		return len(line)
 	}
 	r := regexp.MustCompilePOSIX(fmt.Sprintf(".{%d,%d}(\\x1b[^m]+m)?", guess/2, guess))
-	m := r.FindStringIndex(line)
-	if m != nil {
+	if m := r.FindStringIndex(line); m != nil {
 		return m[1] // second element in slice is the end index
 	}
 	return guess // Dunno what to do at this point. It's probably unlikely to happen often though.
+}
+
+// HTTPLogWrapper wraps the standard logger to implement the LeveledLogger interface from retryablehttp.
+type HTTPLogWrapper struct {
+	Log *logging.Logger
+}
+
+// Error logs at error level
+func (w *HTTPLogWrapper) Error(msg string, keysAndValues ...interface{}) {
+	w.Log.Errorf("%v: %v", msg, keysAndValues)
+}
+
+// Info logs at info level
+func (w *HTTPLogWrapper) Info(msg string, keysAndValues ...interface{}) {
+	w.Log.Infof("%v: %v", msg, keysAndValues)
+}
+
+// Debug logs at debug level
+func (w *HTTPLogWrapper) Debug(msg string, keysAndValues ...interface{}) {
+	w.Log.Debugf("%v: %v", msg, keysAndValues)
+}
+
+// Warn logs at warning level
+func (w *HTTPLogWrapper) Warn(msg string, keysAndValues ...interface{}) {
+	w.Log.Warningf("%v: %v", msg, keysAndValues)
+}
+
+// IsATerminal returns true if the given file is an interactive TTY.
+func IsATerminal(file *os.File) bool {
+	return term.IsTerminal(int(file.Fd()))
 }

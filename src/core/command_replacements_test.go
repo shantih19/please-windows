@@ -4,12 +4,12 @@ package core
 
 import (
 	"encoding/base64"
-	"io/ioutil"
 	"os"
 	"path"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var wd string
@@ -99,7 +99,7 @@ func TestReplacementsForTest(t *testing.T) {
 	target2 := makeTarget2("//path/to:target2", "", nil)
 	target1 := makeTarget2("//path/to:target1", "$(exe //path/to:target1) $(location //path/to:target2)", target2)
 	target1.IsBinary = true
-	target1.IsTest = true
+	target1.Test = new(TestFields)
 
 	expected := "./target1.py path/to/target2.py"
 	cmd, _ := ReplaceTestSequences(state, target1, target1.Command)
@@ -196,7 +196,7 @@ func TestHashReplacement(t *testing.T) {
 	// Need to write the file that will be used to calculate the hash.
 	err := os.MkdirAll("plz-out/gen/path/to", 0755)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile("plz-out/gen/path/to/target2.py", []byte(`"""Test file for command_replacements_test"""`), 0644)
+	err = os.WriteFile("plz-out/gen/path/to/target2.py", []byte(`"""Test file for command_replacements_test"""`), 0644)
 	assert.NoError(t, err)
 
 	target2 := makeTarget2("//path/to:target2", "cp $< $@", nil)
@@ -272,6 +272,20 @@ func TestCrossCompileReplacement(t *testing.T) {
 	assert.Equal(t, expected, replaceSequences(state, target1))
 }
 
+func TestEntryPoints(t *testing.T) {
+	target := NewBuildTarget(ParseBuildLabel("//tools:foo", ""))
+	target.EntryPoints = map[string]string{"some_ep": "bin/some_ep"}
+	target.IsBinary = true
+	target.AddOutput("bin/some_ep")
+	graph := NewGraph()
+	graph.AddTarget(target)
+
+	cmd, err := ReplaceSequences(state, target, "$(out_exe //tools:foo|some_ep)")
+	require.NoError(t, err)
+
+	require.Equal(t, "plz-out/bin/tools/bin/some_ep", cmd)
+}
+
 func makeTarget2(name string, command string, dep *BuildTarget) *BuildTarget {
 	target := NewBuildTarget(ParseBuildLabel(name, ""))
 	target.Command = command
@@ -282,7 +296,10 @@ func makeTarget2(name string, command string, dep *BuildTarget) *BuildTarget {
 		graph := NewGraph()
 		graph.AddTarget(target)
 		graph.AddTarget(dep)
-		graph.AddDependency(target.Label, dep.Label)
+		target.AddDependency(dep.Label)
+		if err := target.ResolveDependencies(graph); err != nil {
+			log.Fatalf("Failed to resolve some dependencies for %s: %s", target, err)
+		}
 	}
 	return target
 }

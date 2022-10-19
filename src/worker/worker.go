@@ -10,12 +10,12 @@ import (
 	"strings"
 	"sync"
 
-	"gopkg.in/op/go-logging.v1"
-
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
+	"github.com/thought-machine/please/src/process"
 )
 
-var log = logging.MustGetLogger("worker")
+var log = logging.Log
 
 // A workerServer is the structure we use to maintain information about a remote work server.
 type workerServer struct {
@@ -93,8 +93,8 @@ func getOrStartWorker(state *core.BuildState, worker string) (*workerServer, err
 		}
 		worker = path
 	}
-	cmd := state.ProcessExecutor.ExecCommand(worker)
-	cmd.Env = core.GeneralBuildEnvironment(state.Config)
+	cmd := state.ProcessExecutor.ExecCommand(process.NoSandbox, false, worker)
+	cmd.Env = core.GeneralBuildEnvironment(state)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -119,7 +119,7 @@ func getOrStartWorker(state *core.BuildState, worker string) (*workerServer, err
 	go w.sendRequests(stdin)
 	go w.readResponses(stdout)
 	go w.wait()
-	state.Stats.NumWorkerProcesses = len(workerMap)
+	state.SetNumWorkerStat(len(workerMap))
 	return w, nil
 }
 

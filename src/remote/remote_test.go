@@ -1,7 +1,6 @@
 package remote
 
 import (
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -11,12 +10,12 @@ import (
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	pb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
-	"github.com/golang/protobuf/ptypes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thought-machine/please/src/fs"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/thought-machine/please/src/core"
+	"github.com/thought-machine/please/src/fs"
 )
 
 func TestInit(t *testing.T) {
@@ -64,9 +63,12 @@ func TestExecuteBuild(t *testing.T) {
 
 type postBuildFunction func(*core.BuildTarget, string) error //nolint:unused
 
+//nolint:unused
 func (f postBuildFunction) Call(target *core.BuildTarget, output string) error {
 	return f(target, output)
 }
+
+//nolint:unused
 func (f postBuildFunction) String() string { return "" }
 
 func TestExecutePostBuildFunction(t *testing.T) {
@@ -101,9 +103,9 @@ func TestExecuteTest(t *testing.T) {
 	c := newClientInstance("test")
 	target := core.NewBuildTarget(core.BuildLabel{PackageName: "package", Name: "target3"})
 	target.AddOutput("remote_test")
-	target.TestTimeout = time.Minute
-	target.TestCommand = "$TEST"
-	target.IsTest = true
+	target.Test = new(core.TestFields)
+	target.Test.Timeout = time.Minute
+	target.Test.Command = "$TEST"
 	target.IsBinary = true
 	target.SetState(core.Building)
 	err := c.Store(target)
@@ -112,7 +114,7 @@ func TestExecuteTest(t *testing.T) {
 	_, err = c.Test(0, target, 1)
 	assert.NoError(t, err)
 
-	results, err := ioutil.ReadFile(filepath.Join(target.TestDir(1), core.TestResultsFile))
+	results, err := os.ReadFile(filepath.Join(target.TestDir(1), core.TestResultsFile))
 	require.NoError(t, err)
 
 	assert.Equal(t, testResults, results)
@@ -123,9 +125,9 @@ func TestExecuteTestWithCoverage(t *testing.T) {
 	c.state.NeedCoverage = true // bit of a hack but we need to turn this on somehow
 	target := core.NewBuildTarget(core.BuildLabel{PackageName: "package", Name: "target4"})
 	target.AddOutput("remote_test")
-	target.TestTimeout = time.Minute
-	target.TestCommand = "$TEST"
-	target.IsTest = true
+	target.Test = new(core.TestFields)
+	target.Test.Timeout = time.Minute
+	target.Test.Command = "$TEST"
 	target.IsBinary = true
 	err := c.Store(target)
 	assert.NoError(t, err)
@@ -134,10 +136,10 @@ func TestExecuteTestWithCoverage(t *testing.T) {
 	_, err = c.Test(0, target, 1)
 	assert.NoError(t, err)
 
-	results, err := ioutil.ReadFile(filepath.Join(target.TestDir(1), core.TestResultsFile))
+	results, err := os.ReadFile(filepath.Join(target.TestDir(1), core.TestResultsFile))
 	require.NoError(t, err)
 
-	coverage, err := ioutil.ReadFile(filepath.Join(target.TestDir(1), core.CoverageFile))
+	coverage, err := os.ReadFile(filepath.Join(target.TestDir(1), core.CoverageFile))
 	require.NoError(t, err)
 
 	assert.Equal(t, testResults, results)
@@ -238,9 +240,9 @@ func TestOutDirsSetOutsOnTarget(t *testing.T) {
 		ExitCode: 0,
 		ExecutionMetadata: &pb.ExecutedActionMetadata{
 			Worker:                      "kev",
-			QueuedTimestamp:             ptypes.TimestampNow(),
-			ExecutionStartTimestamp:     ptypes.TimestampNow(),
-			ExecutionCompletedTimestamp: ptypes.TimestampNow(),
+			QueuedTimestamp:             timestamppb.Now(),
+			ExecutionStartTimestamp:     timestamppb.Now(),
+			ExecutionCompletedTimestamp: timestamppb.Now(),
 		},
 	}
 
@@ -255,7 +257,7 @@ func TestOutDirsSetOutsOnTarget(t *testing.T) {
 	})
 
 	c.state.AddOriginalTarget(outDirTarget.Label, true)
-	c.state.DownloadOutputs = true
+	c.state.OutputDownload = core.OriginalOutputDownload
 	require.True(t, c.state.ShouldDownload(outDirTarget))
 
 	outDirTarget.AddOutputDirectory("foo")
@@ -311,6 +313,38 @@ func TestDirectoryMetadataStore(t *testing.T) {
 
 	_, err = os.Lstat(filepath.Join(storeDirectoryName, "de", "delete"))
 	assert.True(t, os.IsNotExist(err))
+}
+
+func TestTargetPlatform(t *testing.T) {
+	c := newClientInstance("platform_test")
+	c.platform = convertPlatform(c.state.Config.Remote.Platform) // Bit of a hack but we can't go through the normal path.
+	target := core.NewBuildTarget(core.BuildLabel{PackageName: "package", Name: "target"})
+	cmd, err := c.buildCommand(target, &pb.Directory{}, false, false, false)
+	assert.NoError(t, err)
+	assert.Equal(t, &pb.Platform{
+		Properties: []*pb.Platform_Property{
+			{
+				Name:  "OSFamily",
+				Value: "linux",
+			},
+		},
+	}, cmd.Platform)
+
+	target.Labels = []string{"remote-platform-property:size=chomky"}
+	cmd, err = c.buildCommand(target, &pb.Directory{}, false, false, false)
+	assert.NoError(t, err)
+	assert.Equal(t, &pb.Platform{
+		Properties: []*pb.Platform_Property{
+			{
+				Name:  "size",
+				Value: "chomky",
+			},
+			{
+				Name:  "OSFamily",
+				Value: "linux",
+			},
+		},
+	}, cmd.Platform)
 }
 
 // Store is a small hack that stores a target's outputs for testing only.

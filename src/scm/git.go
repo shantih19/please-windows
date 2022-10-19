@@ -3,8 +3,8 @@
 package scm
 
 import (
+	"bufio"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
@@ -16,25 +16,49 @@ import (
 	"github.com/sourcegraph/go-diff/diff"
 )
 
+const pleaseDoNotEdit = "# Entries below this point are managed by Please (DO NOT EDIT)"
+
+var defaultIgnoredFiles = []string{"plz-out", ".plzconfig.local"}
+
+const ignoreFileName = ".gitignore"
+
 // git implements operations on a git repository.
 type git struct {
 	repoRoot string
+}
+
+type gitIgnore struct {
+	*os.File
+	entries      map[string]struct{}
+	hasDoNotEdit bool
 }
 
 // DescribeIdentifier returns the string that is a "human-readable" identifier of the given revision.
 func (g *git) DescribeIdentifier(revision string) string {
 	out, err := exec.Command("git", "describe", "--always", revision).CombinedOutput()
 	if err != nil {
-		log.Fatalf("Failed to read %s: %s", revision, err)
+		log.Fatalf("Failed to read %s: %s\nOutput:\n%s", revision, err, string(out))
 	}
 	return strings.TrimSpace(string(out))
 }
 
 // CurrentRevIdentifier returns the string that specifies what the current revision is.
-func (g *git) CurrentRevIdentifier() string {
+//
+// If "permanent" is true, CurrentRevIdentifier returns the current revision's commit hash; this
+// should be used to uniquely and permanently identify the revision. If "permanent" is false,
+// CurrentRevIdentifier returns the name of a branch if the revision is the HEAD of that branch,
+// and the current revision's commit hash otherwise; this will not permanently identify the current
+// revision, as the HEAD of the branch may change in future.
+func (g *git) CurrentRevIdentifier(permanent bool) string {
+	if !permanent {
+		out, err := exec.Command("git", "symbolic-ref", "-q", "--short", "HEAD").CombinedOutput()
+		if err == nil {
+			return strings.TrimSpace(string(out))
+		}
+	}
 	out, err := exec.Command("git", "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
-		log.Fatalf("Failed to read HEAD: %s", err)
+		log.Fatalf("Failed to read HEAD: %s\nOutput:\n%s", err, string(out))
 	}
 	return strings.TrimSpace(string(out))
 }
@@ -48,7 +72,7 @@ func (g *git) ChangesIn(diffSpec string, relativeTo string) []string {
 	command := []string{"diff-tree", "--no-commit-id", "--name-only", "-r", diffSpec}
 	out, err := exec.Command("git", command...).CombinedOutput()
 	if err != nil {
-		log.Fatalf("unable to determine changes: %s", err)
+		log.Fatalf("unable to determine changes: %s\nOutput:\n%s", err, string(out))
 	}
 	output := strings.Split(string(out), "\n")
 	for _, o := range output {
@@ -67,7 +91,7 @@ func (g *git) ChangedFiles(fromCommit string, includeUntracked bool, relativeTo 
 
 	out, err := exec.Command("git", append(command, relSuffix...)...).CombinedOutput()
 	if err != nil {
-		log.Fatalf("unable to find changes: %s", err)
+		log.Fatalf("unable to find changes: %s\nOutput:\n%s)", err, string(out))
 	}
 	files := strings.Split(string(out), "\n")
 
@@ -75,9 +99,10 @@ func (g *git) ChangedFiles(fromCommit string, includeUntracked bool, relativeTo 
 		// Grab the diff from the merge-base to HEAD using ... syntax.  This ensures we have just
 		// the changes that have occurred on the current branch.
 		command = []string{"diff", "--name-only", fromCommit + "...HEAD"}
-		out, err = exec.Command("git", append(command, relSuffix...)...).CombinedOutput()
+		command = append(command, relSuffix...)
+		out, err = exec.Command("git", command...).CombinedOutput()
 		if err != nil {
-			log.Fatalf("unable to check diff vs. %s: %s", fromCommit, err)
+			log.Fatalf("unable to check diff vs. %s: %s\nOutput:\n%s", fromCommit, err, string(out))
 		}
 		committedChanges := strings.Split(string(out), "\n")
 		files = append(files, committedChanges...)
@@ -86,7 +111,7 @@ func (g *git) ChangedFiles(fromCommit string, includeUntracked bool, relativeTo 
 		command = []string{"ls-files", "--other", "--exclude-standard"}
 		out, err = exec.Command("git", append(command, relSuffix...)...).CombinedOutput()
 		if err != nil {
-			log.Fatalf("unable to determine untracked files: %s", err)
+			log.Fatalf("unable to determine untracked files: %s\nOutput:\n%s", err, string(out))
 		}
 		untracked := strings.Split(string(out), "\n")
 		files = append(files, untracked...)
@@ -107,24 +132,80 @@ func (g *git) fixGitRelativePath(worktreePath, relativeTo string) string {
 	return p
 }
 
-func (g *git) IgnoreFile(name string) error {
-	gitignore := path.Join(g.repoRoot, ".gitignore")
-	b, err := ioutil.ReadFile(gitignore)
-	if err != nil && !os.IsNotExist(err) { // Not an error for this not to exist.
+func openGitignore(file string) (*gitIgnore, error) {
+	f, err := os.OpenFile(file, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	ignoreFile := &gitIgnore{
+		File:    f,
+		entries: map[string]struct{}{},
+	}
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == pleaseDoNotEdit {
+			ignoreFile.hasDoNotEdit = true
+			continue
+		}
+		ignoreFile.entries[line] = struct{}{}
+	}
+	return ignoreFile, nil
+}
+
+func (g *git) IgnoreFiles(path string, files []string) error {
+	// If we're generating the ignore in the root of the project, we should ignore some Please stuff too
+	if filepath.Dir(path) == "." && files == nil {
+		files = defaultIgnoredFiles
+	}
+
+	ignore, err := openGitignore(filepath.Join(g.repoRoot, path))
+	if err != nil {
 		return err
 	}
-	if len(b) > 0 { // Don't append an initial newline if at the start of the file.
-		b = append(b, '\n')
+
+	defer ignore.Close()
+
+	newLines := make([]string, 0, len(files))
+	for _, file := range files {
+		if _, ok := ignore.entries[file]; ok {
+			continue
+		}
+		newLines = append(newLines, file)
 	}
-	b = append(b, []byte("# Please output directory and local configuration\nplz-out\n.plzconfig.local\n")...)
-	return ioutil.WriteFile(gitignore, b, 0644)
+
+	if len(newLines) > 0 && !ignore.hasDoNotEdit {
+		if _, err := fmt.Fprintln(ignore, "\n"+pleaseDoNotEdit); err != nil {
+			return err
+		}
+	}
+	for _, line := range newLines {
+		if _, err := fmt.Fprintln(ignore, line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (g *git) FindClosestIgnoreFile(path string) string {
+	_, err := os.Lstat(filepath.Join(g.repoRoot, path, ignoreFileName))
+	if err == nil {
+		return filepath.Join(path, ignoreFileName)
+	}
+
+	if filepath.Clean(path) == "." {
+		return ignoreFileName
+	}
+	return g.FindClosestIgnoreFile(filepath.Dir(path))
 }
 
 func (g *git) Remove(names []string) error {
 	cmd := exec.Command("git", append([]string{"rm", "-q"}, names...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git rm failed: %s %s", err, out)
+		return fmt.Errorf("git rm failed: %s\nOutput:\n%s", err, string(out))
 	}
 	return nil
 }
@@ -133,7 +214,7 @@ func (g *git) ChangedLines() (map[string][]int, error) {
 	cmd := exec.Command("git", "diff", "origin/master", "--unified=0", "--no-color", "--no-ext-diff")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("git diff failed: %s", err)
+		return nil, fmt.Errorf("git diff failed: %s\nOutput:\n%s", err, string(out))
 	}
 	return g.parseChangedLines(out)
 }
@@ -159,7 +240,7 @@ func (g *git) parseHunks(hunks []*diff.Hunk) []int {
 
 func (g *git) Checkout(revision string) error {
 	if out, err := exec.Command("git", "checkout", revision).CombinedOutput(); err != nil {
-		return fmt.Errorf("git checkout of %s failed: %s\n%s", revision, err, out)
+		return fmt.Errorf("git checkout of %s failed: %s\nOutput:\n%s", revision, err, string(out))
 	}
 	return nil
 }

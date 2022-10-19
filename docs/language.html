@@ -1,259 +1,289 @@
+<h1 class="title-1">The BUILD language</h1>
 
-    <h1>The BUILD language</h1>
+<p>
+  Please's BUILD files typically contain a series of build rule declarations.
+  These are invocations of builtins like
+  <code class="code">java_binary</code> which create new BUILD targets.
+</p>
 
-    <p>Please's BUILD files typically contain a series of build rule declarations. These are
-      invocations of builtins like <code>java_binary</code> which create new BUILD targets.</p>
+<p>
+  However, you can do much more with it; it is a fully capable programming
+  language with which it's possible to script the creation of build targets in
+  elaborate ways. See <a class="copy-link" href="#grammar">below</a> for a
+  formal description of the grammar; it is a subset of Python so should be
+  fairly familiar.
+</p>
 
-    <p>However, you can do much more with it; it is a fully capable programming language with which
-      it's possible to script the creation of build targets in elaborate ways. See
-      <a href="#grammar">below</a> for a formal description of the grammar; it is a subset of
-      Python so should be fairly familiar.</p>
+<p>
+  You can do most things that one might expect in such a language;
+  <code class="code">for</code> and <code class="code">if</code> statements,
+  define functions, create lists and dicts, etc. Conventionally we keep complex
+  logic in build_defs files but at present there is no difference in accepted
+  syntax between the two.
+</p>
 
-    <p>You can do most things that one might expect in such a language; <code>for</code> and
-      <code>if</code> statements, define functions, create lists and dicts, etc. Conventionally
-      we keep complex logic in build_defs files but at present there is no difference in accepted
-      syntax between the two.</p>
+<p>
+  One obviously needs a mechanism to import new code; in Please that is
+  <a class="copy-link" href="/lexicon.html#subinclude">subinclude</a>. This
+  function takes the output of a build rule elsewhere in the repo and makes it
+  available in the context of the currently executing file - for example, if it
+  has defined a function, that function is now available in your BUILD file at
+  the top level.
+</p>
 
-    <p>One obviously needs a mechanism to import new code; in Please that is <a href="lexicon.html#subinclude">subinclude</a>.
-      This function takes the output of a build rule elsewhere in the repo and makes it available
-      in the context of the currently executing file - for example, if it has defined a function,
-      that function is now available in your BUILD file at the top level.</p>
+<p>
+  See the
+  <a class="copy-link" href="/lexicon.html">built in rules &amp; languages</a>
+  for a list of built in rules, as well as any
+  <a class="copy-link" href="/pleasings.html">extra rules</a> from the pleasings
+  repo.
+</p>
 
-    <p>See <a href="lexicon.html">here</a> for a full description of available builtin rules.</p>
+<section class="mt4">
+  <h2 class="title-2">Types</h2>
 
-    <h2>Types</h2>
+  <p>The set of builtin types are again fairly familiar:</p>
 
-    <p>The set of builtin types are again fairly familiar:
-      <ul>
-	<li><b>Integers</b> (all integers are 64-bit signed integers)</li>
-	<li><b>Strings</b></li>
-	<li><b>Lists</b></li>
-	<li><b>Dictionaries</b></li>
-	<li><b>Functions</b></li>
-    <li><b>Booleans</b> (named <code>True</code> and <code>False</code>)</li>
-      </ul>
-    </p>
+  <ul class="bulleted-list">
+    <li>
+      <span
+        ><strong>Integers</strong> (all integers are 64-bit signed
+        integers)</span
+      >
+    </li>
+    <li>
+      <span><strong>Strings</strong></span>
+    </li>
+    <li>
+      <span><strong>Lists</strong></span>
+    </li>
+    <li>
+      <span><strong>Dictionaries</strong></span>
+    </li>
+    <li>
+      <span><strong>Functions</strong></span>
+    </li>
+    <li>
+      <span>
+        <strong>Booleans</strong> (named <code class="code">True</code> and
+        <code class="code">False</code>)</span
+      >
+    </li>
+  </ul>
 
-    <p>There are no floating-point numbers or class types. In some cases lists and dicts can be
-      "frozen" to prohibit modification when they may be shared between files; that's done implicitly
-      by the runtime when appropriate.</p>
+  <p>
+    There are no floating-point numbers or class types. In some cases lists and
+    dicts can be "frozen" to prohibit modification when they may be shared
+    between files; that's done implicitly by the runtime when appropriate.
+  </p>
 
-    <p>Dictionaries are somewhat restricted in function; they may only be keyed by strings and cannot
-      be iterated directly - i.e. one must use <code>keys()</code>, <code>values()</code> or
-      <code>items()</code>. The results of all these functions are always consistently ordered.<br/>
-      They support <a href="https://www.python.org/dev/peps/pep-0584">PEP-584</a> style unions (although not the |= form).</p>
+  <p>
+    Dictionaries are somewhat restricted in function; they may only be keyed by
+    strings and cannot be iterated directly - i.e. one must use
+    <code class="code">keys()</code>, <code class="code">values()</code> or
+    <code class="code">items()</code>. The results of all these functions are
+    always consistently ordered.<br />
+    They support
+    <a
+      class="copy-link"
+      href="https://www.python.org/dev/peps/pep-0584"
+      target="_blank"
+      rel="noopener"
+      >PEP-584</a
+    >
+    style unions (although not the |= form).
+  </p>
+</section>
 
-    <h2>Functions</h2>
+<section class="mt4">
+  <h2 class="title-2">Functions</h2>
 
-    <p>The following functions are available as builtins:
-      <ul>
-	    <li><code><span class="fn-name">len</span><span class="fn-p">(</span><span class="fn-arg">x</span><span class="fn-p">)</span></code>
-          - returns the length of <code>x</code></li>
-	    <li><code><span class="fn-name">enumerate</span><span class="fn-p">(</span><span class="fn-arg">seq</span><span class="fn-p">)</span></code>
-          - returns a list of pairs of the index and object for each item in <code>seq</code></li>
-	    <li><code><span class="fn-name">zip</span><span class="fn-p">(</span><span class="fn-arg">x</span>, <span class="fn-arg">y</span>, <span class="fn-arg">...</span><span class="fn-p">)</span></code>
-          - returns a list in which each element has one item from each argument</li>
-	    <li><code><span class="fn-name">isinstance</span><span class="fn-p">(</span><span class="fn-arg">x</span>, <span class="fn-arg">type</span><span class="fn-p">)</span></code>
-          - returns True if <code>x</code> is of the given type.</li>
-	    <li><code><span class="fn-name">range</span><span class="fn-p">(</span>[<span class="fn-arg">start</span>, ]<span class="fn-arg">stop</span>[, <span class="fn-arg">step</span>]</span><span class="fn-p">)</span></code>
-          - returns a list of integers up to <code>stop</code> (or from <code>start</code> to <code>stop</code>)</li>
-	    <li><code><span class="fn-name">any</span><span class="fn-p">(</span><span class="fn-arg">seq</span><span class="fn-p">)</span></code>
-          - returns true if any of the items in <code>seq</code> are considered true.</li>
-	    <li><code><span class="fn-name">all</span><span class="fn-p">(</span><span class="fn-arg">seq</span><span class="fn-p">)</span></code>
-          - returns true if all of the items in <code>seq</code> are considered true.</li>
-	    <li><code><span class="fn-name">sorted</span><span class="fn-p">(</span><span class="fn-arg">seq</span><span class="fn-p">)</span></code>
-          - returns a copy of the given list with the contents sorted.</li>
-	    <li><code><span class="fn-name">package_name</span><span class="fn-p">(</span><span class="fn-arg"></span><span class="fn-p">)</span></code>
-          - returns the package being currently parsed.</li>
-        <li><code><span class="fn-name">subrepo_name</span><span class="fn-p">(</span><span class="fn-arg"></span><span class="fn-p">)</span></code>
-            - returns the subrepo of the package being currently parsed or the empty string if this is not a subrepo.</li>
-	    <li><code><span class="fn-name">join_path</span><span class="fn-p">(</span><span class="fn-arg">x</span>, <span class="fn-arg">...</span><span class="fn-p">)</span></code>
-          - joins the given path elements using the OS separator. It will intelligently
-      handle repeated or missing separators.</li>
-	    <li><code><span class="fn-name">split_path</span><span class="fn-p">(</span><span class="fn-arg">path</span><span class="fn-p">)</span></code>
-          - splits the given path into the directory and filename.</li>
-	    <li><code><span class="fn-name">splitext</span><span class="fn-p">(</span><span class="fn-arg">filename</span><span class="fn-p">)</span></code>
-          - splits the given filename into base name and extension at the final dot.</li>
-	    <li><code><span class="fn-name">basename</span><span class="fn-p">(</span><span class="fn-arg">path</span><span class="fn-p">)</span></code>
-          - returns the basename of a file</li>
-	    <li><code><span class="fn-name">dirname</span><span class="fn-p">(</span><span class="fn-arg">path</span><span class="fn-p">)</span></code>
-          - returns the directory name of a file.</li>
-	    <li><code><span class="fn-name">breakpoint</span><span class="fn-p">()</span></code>
-          - breaks into an interactive debugger allowing inspection of the current scope.
-          It would be a good idea to run Please with the <code>-p</code> / <code>--plain_output</code>
-          flag if intending to use this.</li>
-      </ul>
-    </p>
+  <p>
+    The build language has a rich set of builtin functions that largely resemble
+    those provided by python. In addition to these, there are some additional
+    built in functions specific to the Please domain. See the
+    <a class="copy-link" href="/lexicon.html#python-builtins"
+      >built in functions</a
+    >
+    documentation for more information.
+  </p>
+</section>
 
-    <p>The following are available as member functions of strings:
-      <ul>
-	    <li><code><span class="fn-name">join</span><span class="fn-p">(</span><span class="fn-arg">seq</span><span class="fn-p">)</span></code>
-          - joins the elements of <code>seq</code> together with this string as a separator.</li>
-	    <li><code><span class="fn-name">split</span><span class="fn-p">(</span><span class="fn-arg">sep</span><span class="fn-p">)</span></code>
-          - splits this string at each occurrence of the given separator.</li>
-	    <li><code><span class="fn-name">replace</span><span class="fn-p">(</span><span class="fn-arg">old</span>, <span class="fn-arg">new</span><span class="fn-p">)</span></code>
-          - returns a copy of this string with all instances of <code>old</code> replaced with <code>new</code>.</li>
-	    <li><code><span class="fn-name">partition</span><span class="fn-p">(</span><span class="fn-arg">sep</span><span class="fn-p">)</span></code>
-          - breaks this string around the first occurrence of <code>sep</code> and returns a 3-tuple of (before, sep, after).</li>
-	    <li><code><span class="fn-name">rpartition</span><span class="fn-p">(</span><span class="fn-arg">sep</span><span class="fn-p">)</span></code>
-          - breaks this string around the last occurrence of <code>sep</code> and returns a 3-tuple of (before, sep, after).</li>
-	    <li><code><span class="fn-name">startswith</span><span class="fn-p">(</span><span class="fn-arg">prefix</span><span class="fn-p">)</span></code>
-          - returns true if this string begins with <code>prefix</code></li>
-	    <li><code><span class="fn-name">endswith</span><span class="fn-p">(</span><span class="fn-arg">suffix</span><span class="fn-p">)</span></code>
-          - returns true if this string ends with <code>suffix</code></li>
-	    <li><code><span class="fn-name">format</span><span class="fn-p">(</span><span class="fn-arg">arg1=val1</span>, <span class="fn-arg">arg2=val2</span>, <span class="fn-arg">...</span>)</span><span class="fn-p">)</span></code>
-          - Replaces named parameters in the string.</li>
-	    <li><code><span class="fn-name">lstrip</span><span class="fn-p">(</span><span class="fn-arg">cutset</span><span class="fn-p">)</span></code>
-          - strips all characters in <code>cutset</code> from the beginning of this string.</li>
-	    <li><code><span class="fn-name">rstrip</span><span class="fn-p">(</span><span class="fn-arg">cutset</span><span class="fn-p">)</span></code>
-          - strips all characters in <code>cutset</code> from the end of this string.</li>
-	    <li><code><span class="fn-name">strip</span><span class="fn-p">(</span><span class="fn-arg">cutset</span><span class="fn-p">)</span></code>
-          - strips all characters in <code>cutset</code> from the beginning & end of this string.</li>
-        <li><code><span class="fn-name">removeprefix</span><span class="fn-p">(</span><span class="fn-arg">prefix</span><span class="fn-p">)</span></code>
-          - strips the exact string <code>prefix</code> from the beginning of this string.</li>
-        <li><code><span class="fn-name">removesuffix</span><span class="fn-p">(</span><span class="fn-arg">suffix</span><span class="fn-p">)</span></code>
-          - strips the exact string <code>suffix</code> from the end of this string.</li>
-	    <li><code><span class="fn-name">find</span><span class="fn-p">(</span><span class="fn-arg">needle</span><span class="fn-p">)</span></code>
-          - returns the index of the first occurrence of <code>needle</code> in this string.</li>
-	    <li><code><span class="fn-name">rfind</span><span class="fn-p">(</span><span class="fn-arg">needle</span><span class="fn-p">)</span></code>
-          - returns the index of the last occurrence of <code>needle</code> in this string.</li>
-	    <li><code><span class="fn-name">count</span><span class="fn-p">(</span><span class="fn-arg">needle</span><span class="fn-p">)</span></code>
-          - returns the number of times <code>needle</code> occurs in this string.</li>
-	    <li><code><span class="fn-name">upper</span><span class="fn-p">()</span></code>
-          - returns a copy of this string converted to uppercase.</li>
-	    <li><code><span class="fn-name">lower</span><span class="fn-p">()</span></code>
-          - returns a copy of this string converted to lowercase.</li>
-      </ul>
-    </p>
+<section class="mt4">
+  <h2 class="title-2">Style</h2>
 
-    <p>The following are available as member functions of dictionaries:
-      <ul>
-	    <li><code><span class="fn-name">get</span><span class="fn-p">(</span><span class="fn-arg">key</span>[, </span><span class="fn-arg">default</span>]<span class="fn-p">)</span></code>
-          - returns the item with the given key, or the default (<code>None</code> if that is not given).</li>
-	    <li><code><span class="fn-name">setdefault</span><span class="fn-p">(</span><span class="fn-arg">key</span>[, </span><span class="fn-arg">default</span>]<span class="fn-p">)</span></code>
-          - If the given key is in the dict, return its value, otherwise insert it with the given value (<code>None</code> if that is not given).</li>
-	    <li><code><span class="fn-name">keys</span><span class="fn-p">()</span></code>
-          - returns an iterable sequence of the keys of this dictionary, in a consistent order.</li>
-	    <li><code><span class="fn-name">values</span><span class="fn-p">()</span></code>
-          - returns an iterable sequence of the values of this dictionary, in a consistent order.</li>
-	    <li><code><span class="fn-name">items</span><span class="fn-p">()</span></code>
-          - returns an iterable sequence of pairs of the keys and values of this dictionary, in a consistent order.</li>
-	    <li><code><span class="fn-name">copy</span><span class="fn-p">()</span></code>
-          - <span class="red">deprecated</span>, use a comprehension if needed. Returns a shallow copy of this dictionary.</li>
-      </ul>
-    </p>
+  <p>
+    We normally write BUILD files in an idiom which doesn't quite match standard
+    Python styles. The justification is that these are mostly just inherited
+    from working on Blaze, but a brief explanation follows after an example:
+  </p>
 
-    <p>Finally, messages can be logged to Please's usual logging mechanism. These
-      may or may not be displayed depending on the <code>-v</code> flag; by default only
-      <code>warning</code> and above are visible.
-      <ul>
-	    <li><code><span class="fn-name">log.debug</span><span class="fn-p">(</span><span class="fn-arg">msg</span>[, <span class="fn-arg">args...</span>]<span class="fn-p">)</span></code>
-        - the lowest level of messages, output at this level is very verbose.</li>
-	    <li><code><span class="fn-name">log.info</span><span class="fn-p">(</span><span class="fn-arg">msg</span>[, <span class="fn-arg">args...</span>]<span class="fn-p">)</span></code>
-        - Informational messages, typically this is the highest level per-target information is logged at.</li>
-	    <li><code><span class="fn-name">log.notice</span><span class="fn-p">(</span><span class="fn-arg">msg</span>[, <span class="fn-arg">args...</span>]<span class="fn-p">)</span></code>
-        - Messages of general interest during the build; it is rare for this to be appropriate from a BUILD file.</li>
-	    <li><code><span class="fn-name">log.warning</span><span class="fn-p">(</span><span class="fn-arg">msg</span>[, <span class="fn-arg">args...</span>]<span class="fn-p">)</span></code>
-        - A warning message that something seems wrong, but it may be recoverable.</li>
-	    <li><code><span class="fn-name">log.error</span><span class="fn-p">(</span><span class="fn-arg">msg</span>[, <span class="fn-arg">args...</span>]<span class="fn-p">)</span></code>
-          - A message indicating that something has gone wrong and it will not be recoverable.
-          This is usually followed shortly by some kind of failure.</li>
-	    <li><code><span class="fn-name">log.fatal</span><span class="fn-p">(</span><span class="fn-arg">msg</span>[, <span class="fn-arg">args...</span>]<span class="fn-p">)</span></code>
-          - Indicates that something has gone catastrophically wrong, and causes the process to exit immediately and unsuccessfully.
-          Usually you are better off using <code>assert</code> or <code>raise</code> to
-          indicate failure, since plz can handle those and annotate with additional output.</li>
-      </ul>
-    </p>
+  <pre class="code-container">
+    <!-- prettier-ignore -->
+    <code data-lang="plz">
+    # Taken from //src/core/BUILD in the Please repo
+    go_library(
+        name = "core",
+        srcs = glob(["*.go"], exclude=["*_test.go", "version.go"]) + [":version"],
+        visibility = ["PUBLIC"],
+        deps = [
+            "//third_party/go:gcfg",
+            "//third_party/go:logging",
+            "//third_party/go:queue",
+        ]
+    )
+    </code>
+  </pre>
 
-    <h2>Style</h2>
+  <p>
+    <strong>All arguments to build rules are passed as keywords.</strong> This
+    is pretty important since (1) nobody will be able to read your BUILD file
+    otherwise and (2) we don't guarantee not to change the order of arguments
+    when we insert new ones. Fortunately Please will check this for you at
+    runtime.
+  </p>
 
-    <p>We normally write BUILD files in an idiom which doesn't quite match standard Python styles.
-      The justification is that these are mostly just inherited from working on Blaze, but a
-      brief explanation follows after an example:</p>
+  <p>
+    Arguments to functions like <code class="code">glob()</code> and
+    <code class="code">subinclude()</code> are not necessarily passed as
+    keywords.
+  </p>
 
-    <pre><code class="language-plz">
-      # Taken from //src/core/BUILD in the Please repo
-      go_library(
-          name = "core",
-          srcs = glob(["*.go"], exclude=["*_test.go", "version.go"]) + [":version"],
-          visibility = ["PUBLIC"],
-          deps = [
-              "//third_party/go:gcfg",
-              "//third_party/go:logging",
-              "//third_party/go:queue",
-          ]
-      )
-    </code></pre>
+  <p>
+    We put spaces around the <code class="code">=</code> for each argument to
+    the build rule - we think it's easier to read this way.
+  </p>
 
-    <p><b>All arguments to build rules are passed as keywords.</b> This is pretty important
-      since (1) nobody will be able to read your BUILD file otherwise and (2) we don't guarantee
-      not to change the order of arguments when we insert new ones. Fortunately Please will
-      check this for you at runtime.</p>
+  <p>
+    Either single or double quotes work, as usual, but don't mix both in one
+    file. We usually prefer double because that's what Buildifier (see below)
+    prefers.
+  </p>
 
-    <p>Arguments to functions like <code>glob()</code> and <code>subinclude()</code> are not
-      necessarily passed as keywords.</p>
+  <p>Lists either go all on one line:</p>
 
-    <p>We put spaces around the <code>=</code> for each argument to the build rule - we think it's
-      easier to read this way.</p>
+  <pre class="code-container">
+    <!-- prettier-ignore -->
+    <code data-lang="plz">
+    ["*_test.go", "version.go"]
+    </code>
+  </pre>
 
-    <p>Either single or double quotes work, as usual, but don't mix both in one file. We usually
-      prefer double because that's what Buildifier (see below) prefers.</p>
+  <p>or are broken across multiple lines like so:</p>
 
-    <p>Lists either go all on one line:
-      <pre><code class="language-plz">
-      ["*_test.go", "version.go"]
-      </code></pre>
-      or are broken across multiple lines like so:
-      <pre><code class="language-plz">
-      [
-          "//third_party/go:gcfg",
-          "//third_party/go:logging",
-          "//third_party/go:queue",
-      ]
-      </code></pre>
-    </p>
+  <pre class="code-container">
+    <!-- prettier-ignore -->
+    <code data-lang="plz">
+    [
+        "//third_party/go:gcfg",
+        "//third_party/go:logging",
+        "//third_party/go:queue",
+    ]
+    </code>
+  </pre>
 
-    <p>Indentation is normally four spaces. Tabs will be rejected by the parser.<br/>
-      Dealing with indentation in a whitespace-significant language is tricky enough without
-      introducing tabs to complicate the situation as well.</p>
+  <p>
+    Indentation is normally four spaces. Tabs will be rejected by the parser.<br />
+    Dealing with indentation in a whitespace-significant language is tricky
+    enough without introducing tabs to complicate the situation as well.
+  </p>
 
-    <p>We generally try to order lists lexicographically where it does not matter (for example
-      <code>deps</code> or <code>visibility</code>).</p>
+  <p>
+    We generally try to order lists lexicographically where it does not matter
+    (for example <code class="code">deps</code> or
+    <code class="code">visibility</code>).
+  </p>
 
-    <p>If you'd like an autoformatter for BUILD files, Google's
-      <a href="https://github.com/bazelbuild/buildifier">Buildifier</a> is very good & fast.
-      We use it both internally & on the Please repo.</p>
+  <p>
+    If you'd like an autoformatter for BUILD files, Google's
+    <a
+      class="copy-link"
+      href="https://github.com/bazelbuild/buildifier"
+      target="_blank"
+      rel="noopener"
+      >Buildifier</a
+    >
+    is very good &amp; fast. We use it both internally &amp; on the Please repo.
+  </p>
+</section>
 
-    <h2><a name="grammar">Grammar</a></h2>
+<section class="mt4">
+  <h2 id="grammar" class="title-2">
+    Grammar
+  </h2>
 
-    <p>The grammar is defined as (more or less) the following in EBNF, where <code>Ident</code>,
-      <code>String</code>, <code>Int</code> and <code>EOL</code> are token types emitted by the lexer.</p>
+  <p>
+    The grammar is defined as (more or less) the following in EBNF, where
+    <code class="code">Ident</code>, <code class="code">String</code>,
+    <code class="code">Int</code> and <code class="code">EOL</code> are token
+    types emitted by the lexer.
+  </p>
 
-    <pre><code>{{ .Grammar }}</code></pre>
+  <pre class="code-container">
+    <!-- prettier-ignore -->
+    <code class="ph4 pv3">{{ .Grammar }}</code>
+  </pre>
 
-    <p>As mentioned above, this is similar to Python but lacks the <code>import</code>, <code>try</code>,
-      <code>except</code>, <code>finally</code>, <code>class</code>, <code>global</code>,
-      <code>nonlocal</code>, <code>while</code> and <code>async</code> keywords. The implementation
-      disallows using these as identifiers nonetheless since some tools might
-      attempt to operate on the file using Python's <code>ast</code> module for convenience, which would not
-      be possible if those keywords are used.<br/>
-      As a result, while <code>raise</code> and <code>assert</code> <b>are</b> supported, it's
-      not possible to catch and handle the resulting exceptions. These hence function only to
-      signal an error condition which results in immediate termination.<br/>
-      Note that <code>assert</code> is never optimised out, as it can be in Python.</p>
+  <p>
+    As mentioned above, this is similar to Python but lacks the
+    <code class="code">import</code>, <code class="code">try</code>,
+    <code class="code">except</code>, <code class="code">finally</code>,
+    <code class="code">class</code>, <code class="code">global</code>,
+    <code class="code">nonlocal</code>, <code class="code">while</code> and
+    <code class="code">async</code> keywords. The implementation disallows using
+    these as identifiers nonetheless since some tools might attempt to operate
+    on the file using Python's <code class="code">ast</code> module for
+    convenience, which would not be possible if those keywords are used.<br />
+    As a result, while <code class="code">raise</code> and
+    <code class="code">assert</code> <strong>are</strong> supported, it's not
+    possible to catch and handle the resulting exceptions. These hence function
+    only to signal an error condition which results in immediate termination.<br />
+    Note that <code class="code">assert</code> is never optimised out, as it can
+    be in Python.
+  </p>
 
-    <p>A more limited set of operators than in Python are available. The provided set are
-      considered sufficient for use in BUILD files.</p>
+  <p>
+    A more limited set of operators than in Python are available. The provided
+    set are considered sufficient for use in BUILD files.
+  </p>
 
-    <p>Function annotations similar to <a href="https://www.python.org/dev/peps/pep-3107">PEP-3107</a>
-      / <a href="https://www.python.org/dev/peps/pep-0484">PEP-484</a> are available, although
-      they have first-class meaning as type hints. The arguments are annotated with the expected
-      type or types (separated by <code>|</code>) and when called the type of the argument will
-      be verified to match. This makes it easier to give useful feedback to users if they
-      make mistakes in their BUILD files (e.g. passing a string where a list is required).</p>
+  <p>
+    Function annotations similar to
+    <a
+      class="copy-link"
+      href="https://www.python.org/dev/peps/pep-3107"
+      target="_blank"
+      rel="noopener"
+      >PEP-3107</a
+    >
+    /
+    <a
+      class="copy-link"
+      href="https://www.python.org/dev/peps/pep-0484"
+      target="_blank"
+      rel="noopener"
+      >PEP-484</a
+    >
+    are available, although they have first-class meaning as type hints. The
+    arguments are annotated with the expected type or types (separated by
+    <code class="code">|</code>) and when called the type of the argument will
+    be verified to match. This makes it easier to give useful feedback to users
+    if they make mistakes in their BUILD files (e.g. passing a string where a
+    list is required).
+  </p>
 
-    <p>User-defined varargs and kwargs functions are not supported.</p>
+  <p>User-defined varargs and kwargs functions are not supported.</p>
 
-    <p><a href="https://www.python.org/dev/peps/pep-0498">PEP-498</a> style "f-string" interpolation
-      is available, but it is deliberately much more limited than in Python; it can only interpolate variable
-      names rather than arbitrary expressions.</p>
+  <p>
+    <a
+      class="copy-link"
+      href="https://www.python.org/dev/peps/pep-0498"
+      target="_blank"
+      rel="noopener"
+      >PEP-498</a
+    >
+    style "f-string" interpolation is available, but it is deliberately much
+    more limited than in Python; it can only interpolate variable names rather
+    than arbitrary expressions.
+  </p>
+</section>

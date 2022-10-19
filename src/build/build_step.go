@@ -3,14 +3,11 @@ package build
 
 import (
 	"bytes"
-	"crypto/sha1"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
@@ -19,37 +16,59 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/shlex"
 	"github.com/hashicorp/go-multierror"
-	"gopkg.in/op/go-logging.v1"
+	"github.com/hashicorp/go-retryablehttp"
 
+	"github.com/thought-machine/please/src/cli"
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/fs"
+	"github.com/thought-machine/please/src/generate"
+	"github.com/thought-machine/please/src/metrics"
+	"github.com/thought-machine/please/src/process"
 	"github.com/thought-machine/please/src/worker"
 )
 
-var log = logging.MustGetLogger("build")
+var log = logging.Log
 
 // Type that indicates that we're stopping the build of a target in a nonfatal way.
 var errStop = fmt.Errorf("stopping build")
 
 // httpClient is the shared http client that we use for fetching remote files.
-var httpClient http.Client
+var httpClient *retryablehttp.Client
 var httpClientOnce sync.Once
+var httpClientLimiter chan struct{}
 
 var magicSourcesWorkerKey = "WORKER"
+
+var successfulRemoteTargetBuildDuration = metrics.NewHistogram(
+	"remote",
+	"target_build_duration",
+	"Time taken to successfully build a target, in milliseconds",
+	metrics.ExponentialBuckets(0.5, 2, 16), // 16 buckets, starting at 0.5ms and doubling in width.
+)
+
+var successfulLocalTargetBuildDuration = metrics.NewHistogram(
+	"local",
+	"target_build_duration",
+	"Time taken to successfully build a target, in milliseconds",
+	metrics.ExponentialBuckets(0.5, 2, 16), // 16 buckets, starting at 0.5ms and doubling in width.
+)
 
 // Build implements the core logic for building a single target.
 func Build(tid int, state *core.BuildState, label core.BuildLabel, remote bool) {
 	target := state.Graph.TargetOrDie(label)
 	state = state.ForTarget(target)
 	target.SetState(core.Building)
+	start := time.Now()
 	if err := buildTarget(tid, state, target, remote); err != nil {
 		if errors.Is(err, errStop) {
 			target.SetState(core.Stopped)
-			state.LogBuildResult(tid, target.Label, core.TargetBuildStopped, "Build stopped")
+			state.LogBuildResult(tid, target, core.TargetBuildStopped, "Build stopped")
 			return
 		}
 		state.LogBuildError(tid, label, core.TargetBuildFailed, err, "Build failed: %s", err)
@@ -59,21 +78,15 @@ func Build(tid int, state *core.BuildState, label core.BuildLabel, remote bool) 
 		target.SetState(core.Failed)
 		return
 	}
-
-	// Add any of the reverse deps that are now fully built to the queue.
-	for _, reverseDep := range state.Graph.ReverseDependencies(target) {
-		if reverseDep.State() == core.Active && state.Graph.AllDepsBuilt(reverseDep) && reverseDep.SyncUpdateState(core.Active, core.Pending) {
-			state.AddPendingBuild(reverseDep.Label, false)
-		}
+	if remote {
+		successfulRemoteTargetBuildDuration.Observe(float64(time.Since(start).Milliseconds()))
+	} else {
+		successfulLocalTargetBuildDuration.Observe(float64(time.Since(start).Milliseconds()))
 	}
-	if target.IsTest && state.NeedTests && state.IsOriginalTarget(target) {
-		if state.TestSequentially {
-			state.AddPendingTest(target.Label, 1)
-		} else {
-			for runNum := 1; runNum <= state.NumTestRuns; runNum++ {
-				state.AddPendingTest(target.Label, runNum)
-			}
-		}
+	// Mark the target as having finished building.
+	target.FinishBuild()
+	if target.IsTest() && state.NeedTests && state.IsOriginalTarget(target) {
+		state.QueueTestTarget(target)
 	}
 }
 
@@ -93,24 +106,36 @@ func validateBuildTargetBeforeBuild(state *core.BuildState, target *core.BuildTa
 	}
 
 	// Check that the build outputs don't belong to another package
-	if err := target.CheckTargetOwnsBuildOutputs(state); err != nil {
-		return err
+	return target.CheckTargetOwnsBuildOutputs(state)
+}
+
+func findFilegroupSourcesWithTmpDir(target *core.BuildTarget) []core.BuildLabel {
+	srcs := make([]core.BuildLabel, 0, len(target.Sources))
+	for _, src := range target.Sources {
+		if l, ok := src.Label(); ok {
+			srcs = append(srcs, l)
+		}
 	}
-	return nil
+	return srcs
 }
 
 func prepareOnly(tid int, state *core.BuildState, target *core.BuildTarget) error {
 	if target.IsFilegroup {
+		potentialTargets := findFilegroupSourcesWithTmpDir(target)
+		if len(potentialTargets) > 0 {
+			return fmt.Errorf("can't prepare temporary directory for %s; filegroups don't have temporary directories... Perhaps you meant one of its srcs: %v", target.Label, potentialTargets)
+		}
+
 		return fmt.Errorf("can't prepare temporary directory for %s; filegroups don't have temporary directories", target.Label)
 	}
 	// Ensure we have downloaded any previous dependencies if that's relevant.
-	if err := downloadInputsIfNeeded(tid, state, target); err != nil {
+	if err := state.DownloadInputsIfNeeded(tid, target, false); err != nil {
 		return err
 	}
-	if err := prepareDirectories(target); err != nil {
+	if err := prepareDirectories(state.ProcessExecutor, target); err != nil {
 		return err
 	}
-	if err := prepareSources(state.Graph, target); err != nil {
+	if err := prepareSources(state, state.Graph, target); err != nil {
 		return err
 	}
 	// This is important to catch errors here where we will recover the panic, rather
@@ -121,17 +146,17 @@ func prepareOnly(tid int, state *core.BuildState, target *core.BuildTarget) erro
 
 // Builds a single target
 // This function takes the following steps:
-// 1) Check if we have already built the rule
-//    a) checks the hashes on xargs of all input files (rule, config, source, secret)
-//    b) re-applies any updates that might have happened during build (the post-build and output dirs)
-//    c) re-checks the hashes to see if those updates changed anything and need to re-build otherwise returns (nothing to do)
-// 2) Checks if we have the build output cached
-//    a) if the action of building this target could've changed how we calculate the output hash,
-//       i)  attempt to fetch just the MD from the cache based on the old hashkey
-//       ii) apply these updates to the outs based on the stored metadata (out dirs + run post build action)
-//    b) attempt to fetch the outputs from the cache based on the output hash
-// 3) Actually build the rule
-// 4) Store result in the cache
+//  1. Check if we have already built the rule
+//     a) checks the hashes on xargs of all input files (rule, config, source, secret)
+//     b) re-applies any updates that might have happened during build (the post-build and output dirs)
+//     c) re-checks the hashes to see if those updates changed anything and need to re-build otherwise returns (nothing to do)
+//  2. Checks if we have the build output cached
+//     a) if the action of building this target could've changed how we calculate the output hash,
+//     i)  attempt to fetch just the MD from the cache based on the old hashkey
+//     ii) apply these updates to the outs based on the stored metadata (out dirs + run post build action)
+//     b) attempt to fetch the outputs from the cache based on the output hash
+//  3. Actually build the rule
+//  4. Store result in the cache
 func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runRemotely bool) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -159,8 +184,8 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 		log.Debug("Finished pre-build function for %s", target.Label)
 	}
 
-	state.LogBuildResult(tid, target.Label, core.TargetBuilding, "Preparing...")
-	if state.PrepareOnly && state.IsOriginalTarget(target) {
+	state.LogBuildResult(tid, target, core.TargetBuilding, "Preparing...")
+	if state.PrepareOnly && state.IsOriginalTarget(target) && !state.NeedTests {
 		return prepareOnly(tid, state, target)
 	}
 
@@ -179,8 +204,14 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 			return err
 		}
 	} else {
+		// Wait if another process is currently building this target
+		state.LogBuildResult(tid, target, core.TargetBuilding, "Acquiring target lock...")
+		file := core.AcquireExclusiveFileLock(target.BuildLockFile())
+		defer core.ReleaseFileLock(file)
+		state.LogBuildResult(tid, target, core.TargetBuilding, "Preparing...")
+
 		// Ensure we have downloaded any previous dependencies if that's relevant.
-		if err := downloadInputsIfNeeded(tid, state, target); err != nil {
+		if err := state.DownloadInputsIfNeeded(tid, target, false); err != nil {
 			return err
 		}
 
@@ -216,7 +247,7 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 					copyFilegroupHashes(state, target)
 				}
 				target.SetState(core.Reused)
-				state.LogBuildResult(tid, target.Label, core.TargetCached, "Unchanged")
+				state.LogBuildResult(tid, target, core.TargetCached, "Unchanged")
 				buildLinks(state, target)
 				return nil // Nothing needs to be done.
 			}
@@ -231,15 +262,16 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 				return err
 			} else if changed {
 				target.SetState(core.Built)
-				state.LogBuildResult(tid, target.Label, core.TargetBuilt, "Built")
+				state.LogBuildResult(tid, target, core.TargetBuilt, "Built")
 			} else {
 				target.SetState(core.Unchanged)
-				state.LogBuildResult(tid, target.Label, core.TargetCached, "Unchanged")
+				state.LogBuildResult(tid, target, core.TargetCached, "Unchanged")
 			}
 			buildLinks(state, target)
 			return nil
 		}
-		if err := prepareDirectories(target); err != nil {
+
+		if err := prepareDirectories(state.ProcessExecutor, target); err != nil {
 			return fmt.Errorf("Error preparing directories for %s: %s", target.Label, err)
 		}
 
@@ -275,15 +307,22 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 		if err := target.CheckSecrets(); err != nil {
 			return err
 		}
-		state.LogBuildResult(tid, target.Label, core.TargetBuilding, "Preparing...")
-		if err := prepareSources(state.Graph, target); err != nil {
+		state.LogBuildResult(tid, target, core.TargetBuilding, "Preparing...")
+		if err := prepareSources(state, state.Graph, target); err != nil {
 			return fmt.Errorf("Error preparing sources for %s: %s", target.Label, err)
 		}
 
-		state.LogBuildResult(tid, target.Label, core.TargetBuilding, target.BuildingDescription)
+		state.LogBuildResult(tid, target, core.TargetBuilding, target.BuildingDescription)
 		metadata, err = buildMaybeRemotely(state, target, cacheKey)
 		if err != nil {
 			return err
+		}
+
+		// Add optional outputs to target metadata
+		metadata.OptionalOutputs = make([]string, 0)
+		for _, output := range fs.Glob(state.Config.Parse.BuildFileName, target.TmpDir(), target.OptionalOutputs, nil, true) {
+			log.Debug("Add discovered optional output to metadata %s", output)
+			metadata.OptionalOutputs = append(metadata.OptionalOutputs, output)
 		}
 
 		metadata.OutputDirOuts, err = addOutputDirectoriesToBuildOutput(target)
@@ -313,12 +352,15 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 	if runRemotely {
 		if metadata.Cached {
 			target.SetState(core.ReusedRemotely)
-			state.LogBuildResult(tid, target.Label, core.TargetBuilt, "Reused existing action")
+			state.LogBuildResult(tid, target, core.TargetBuilt, "Reused existing action")
 		} else {
 			target.SetState(core.BuiltRemotely)
-			state.LogBuildResult(tid, target.Label, core.TargetBuilt, "Built remotely")
+			state.LogBuildResult(tid, target, core.TargetBuilt, "Built remotely")
 		}
 		if state.ShouldDownload(target) {
+			if err := state.EnsureDownloaded(target); err != nil {
+				return err
+			}
 			buildLinks(state, target)
 		}
 		return nil
@@ -326,7 +368,7 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 		return fmt.Errorf("failed to store target build metadata for %s: %w", target.Label, err)
 	}
 
-	state.LogBuildResult(tid, target.Label, core.TargetBuilding, "Collecting outputs...")
+	state.LogBuildResult(tid, target, core.TargetBuilding, "Collecting outputs...")
 	outs, outputsChanged, err := moveOutputs(state, target)
 	if err != nil {
 		return fmt.Errorf("error moving outputs for target %s: %w", target.Label, err)
@@ -341,7 +383,7 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 	}
 	buildLinks(state, target)
 	if state.Cache != nil {
-		state.LogBuildResult(tid, target.Label, core.TargetBuilding, "Storing...")
+		state.LogBuildResult(tid, target, core.TargetBuilding, "Storing...")
 		newCacheKey := mustShortTargetHash(state, target)
 
 		// If the build could modify the target, store the metadata in the cache based on the original state of the
@@ -358,14 +400,14 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 	}
 	// Clean up the temporary directory once it's done.
 	if state.CleanWorkdirs {
-		if err := os.RemoveAll(target.TmpDir()); err != nil {
+		if err := fs.ForceRemove(state.ProcessExecutor, target.TmpDir()); err != nil {
 			log.Warning("Failed to remove temporary directory for %s: %s", target.Label, err)
 		}
 	}
 	if outputsChanged {
-		state.LogBuildResult(tid, target.Label, core.TargetBuilt, "Built")
+		state.LogBuildResult(tid, target, core.TargetBuilt, "Built")
 	} else {
-		state.LogBuildResult(tid, target.Label, core.TargetBuilt, "Built (unchanged)")
+		state.LogBuildResult(tid, target, core.TargetBuilt, "Built (unchanged)")
 	}
 	return nil
 }
@@ -405,21 +447,28 @@ func storeInCache(cache core.Cache, target *core.BuildTarget, key []byte, files 
 }
 
 // retrieveArtifacts attempts to retrieve artifacts from the cache
-//   1) if there are no declared outputs, return true; there's nothing to be done
-//   2) pull all the declared outputs from the cache has based on the short hash of the target
-//   3) check that pulling the artifacts changed the output hash and set the build state accordingly
+//  1. if there are no declared outputs, return true; there's nothing to be done
+//  2. pull all the declared outputs from the cache has based on the short hash of the target
+//  3. check that pulling the artifacts changed the output hash and set the build state accordingly
 func retrieveArtifacts(tid int, state *core.BuildState, target *core.BuildTarget, oldOutputHash []byte) bool {
 	// If there aren't any outputs, we don't have to do anything right now.
 	// Checks later will handle the case of something with a post-build function that
 	// later tries to add more outputs.
 	if len(target.DeclaredOutputs()) == 0 && len(target.DeclaredNamedOutputs()) == 0 {
 		target.SetState(core.Unchanged)
-		state.LogBuildResult(tid, target.Label, core.TargetCached, "Nothing to do")
+		state.LogBuildResult(tid, target, core.TargetCached, "Nothing to do")
 		return true
 	}
-	state.LogBuildResult(tid, target.Label, core.TargetBuilding, "Checking cache...")
+	state.LogBuildResult(tid, target, core.TargetBuilding, "Checking cache...")
 
-	if retrieveFromCache(state.Cache, target, mustShortTargetHash(state, target), target.Outputs()) != nil {
+	cacheKey := mustShortTargetHash(state, target)
+
+	if md := retrieveFromCache(state.Cache, target, cacheKey, target.Outputs()); md != nil {
+		// Retrieve additional optional outputs from metadata
+		if len(md.OptionalOutputs) > 0 {
+			state.Cache.Retrieve(target, cacheKey, md.OptionalOutputs)
+		}
+
 		log.Debug("Retrieved artifacts for %s from cache", target.Label)
 		checkLicences(state, target)
 		newOutputHash, err := calculateAndCheckRuleHash(state, target)
@@ -429,12 +478,22 @@ func retrieveArtifacts(tid int, state *core.BuildState, target *core.BuildTarget
 			return false
 		} else if oldOutputHash == nil || !bytes.Equal(oldOutputHash, newOutputHash) {
 			target.SetState(core.Cached)
-			state.LogBuildResult(tid, target.Label, core.TargetCached, "Cached")
+			state.LogBuildResult(tid, target, core.TargetCached, "Cached")
 		} else {
 			target.SetState(core.Unchanged)
-			state.LogBuildResult(tid, target.Label, core.TargetCached, "Cached (unchanged)")
+			state.LogBuildResult(tid, target, core.TargetCached, "Cached (unchanged)")
 		}
 		buildLinks(state, target)
+
+		// If we could've potentially pulled from the http cache, we need to write the xattrs back as they will be
+		// missing.
+		if state.Config.Cache.HTTPURL != "" {
+			if err := writeRuleHash(state, target); err != nil {
+				log.Warningf("failed to write target hash: %w", err)
+				return false
+			}
+		}
+
 		return true // got from cache
 	}
 	log.Debug("Nothing retrieved from remote cache for %s", target.Label)
@@ -447,13 +506,32 @@ func runBuildCommand(state *core.BuildState, target *core.BuildTarget, command s
 	if target.IsRemoteFile {
 		return nil, fetchRemoteFile(state, target)
 	}
-	env := core.StampedBuildEnvironment(state, target, inputHash, path.Join(core.RepoRoot, target.TmpDir()))
+	if target.IsTextFile {
+		return nil, buildTextFile(state, target)
+	}
+	env := core.StampedBuildEnvironment(state, target, inputHash, path.Join(core.RepoRoot, target.TmpDir()), target.Stamp)
 	log.Debug("Building target %s\nENVIRONMENT:\n%s\n%s", target.Label, env, command)
-	out, combined, err := state.ProcessExecutor.ExecWithTimeoutShell(target, target.TmpDir(), env, target.BuildTimeout, state.ShowAllOutput, command, target.Sandbox)
+	out, combined, err := state.ProcessExecutor.ExecWithTimeoutShell(target, target.TmpDir(), env, target.BuildTimeout, state.ShowAllOutput, false, process.NewSandboxConfig(target.Sandbox, target.Sandbox), command)
 	if err != nil {
 		return nil, fmt.Errorf("Error building target %s: %s\n%s", target.Label, err, combined)
 	}
 	return out, nil
+}
+
+// buildTextFile runs the build action for text_file() rules
+func buildTextFile(state *core.BuildState, target *core.BuildTarget) error {
+	outs := target.Outputs()
+	if len(outs) != 1 {
+		return fmt.Errorf("text_file %s should have a single output, has %d", target.Label, len(outs))
+	}
+	outFile := filepath.Join(target.TmpDir(), outs[0])
+
+	content, err := target.GetFileContent(state)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(outFile, []byte(content), target.OutMode())
 }
 
 // prepareOutputDirectories creates any directories the target has declared it will output into as a nicety
@@ -487,19 +565,19 @@ func prepareParentDirs(target *core.BuildTarget, out string) error {
 }
 
 // Prepares the temp and out directories for a target
-func prepareDirectories(target *core.BuildTarget) error {
-	if err := prepareDirectory(target.TmpDir(), true); err != nil {
+func prepareDirectories(executor *process.Executor, target *core.BuildTarget) error {
+	if err := prepareDirectory(executor, target.TmpDir(), true); err != nil {
 		return err
 	}
 	if err := prepareOutputDirectories(target); err != nil {
 		return err
 	}
-	return prepareDirectory(target.OutDir(), false)
+	return prepareDirectory(executor, target.OutDir(), false)
 }
 
-func prepareDirectory(directory string, remove bool) error {
+func prepareDirectory(executor *process.Executor, directory string, remove bool) error {
 	if remove && core.PathExists(directory) {
-		if err := os.RemoveAll(directory); err != nil {
+		if err := fs.ForceRemove(executor, directory); err != nil {
 			return err
 		}
 	}
@@ -511,8 +589,8 @@ func prepareDirectory(directory string, remove bool) error {
 }
 
 // Symlinks the source files of this rule into its temp directory.
-func prepareSources(graph *core.BuildGraph, target *core.BuildTarget) error {
-	for source := range core.IterSources(graph, target, false) {
+func prepareSources(state *core.BuildState, graph *core.BuildGraph, target *core.BuildTarget) error {
+	for source := range core.IterSources(state, graph, target, false) {
 		if err := core.PrepareSourcePair(source); err != nil {
 			return err
 		}
@@ -542,7 +620,7 @@ func addOutputDirectoriesToBuildOutput(target *core.BuildTarget) ([]string, erro
 func addOutputDirectoryToBuildOutput(target *core.BuildTarget, dir core.OutputDirectory) ([]string, error) {
 	fullDir := filepath.Join(target.TmpDir(), dir.Dir())
 
-	files, err := ioutil.ReadDir(fullDir)
+	files, err := os.ReadDir(fullDir)
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +641,7 @@ func addOutputDirectoryToBuildOutput(target *core.BuildTarget, dir core.OutputDi
 			target.AddOutput(f.Name())
 			outs = append(outs, f.Name())
 
-			if err := fs.RecursiveCopy(from, to, target.OutMode()); err != nil {
+			if err := os.Rename(from, to); err != nil {
 				return nil, err
 			}
 		}
@@ -586,13 +664,14 @@ func copyOutDir(target *core.BuildTarget, from string, to string) ([]string, err
 		err := fs.Walk(from, func(name string, isDir bool) error {
 			dest := path.Join(to, name[len(from):])
 			if isDir {
-				return fs.EnsureDir(dest)
+				return os.MkdirAll(dest, fs.DirPermissions)
 			}
 
 			outName := relativeToTmpdir(dest)
 			outs = append(outs, outName)
 			target.AddOutput(outName)
-			return fs.CopyFile(name, dest, target.OutMode())
+
+			return os.Rename(name, dest)
 		})
 		return outs, err
 	}
@@ -606,7 +685,7 @@ func moveOutputs(state *core.BuildState, target *core.BuildTarget) ([]string, bo
 	tmpDir := target.TmpDir()
 	outDir := target.OutDir()
 	outs := target.Outputs()
-	allOuts := make([]string, len(outs))
+	allOuts := make([]string, len(outs), len(outs)+len(target.OutputDirectories))
 	for i, output := range outs {
 		allOuts[i] = output
 		tmpOutput := path.Join(tmpDir, target.GetTmpOutput(output))
@@ -646,12 +725,12 @@ func moveOutputs(state *core.BuildState, target *core.BuildTarget) ([]string, bo
 
 func moveOutput(state *core.BuildState, target *core.BuildTarget, tmpOutput, realOutput string) (bool, error) {
 	// hash the file
-	newHash, err := state.PathHasher.Hash(tmpOutput, false, true)
+	newHash, err := state.PathHasher.Hash(tmpOutput, false, true, false)
 	if err != nil {
 		return true, err
 	}
 	if fs.PathExists(realOutput) {
-		if oldHash, err := state.PathHasher.Hash(realOutput, false, true); err != nil {
+		if oldHash, err := state.PathHasher.Hash(realOutput, false, true, false); err != nil {
 			return true, err
 		} else if bytes.Equal(oldHash, newHash) {
 			// We already have the same file in the current location. Don't bother moving it.
@@ -714,36 +793,20 @@ func checkForStaleOutput(filename string, err error) bool {
 	return false
 }
 
-// downloadInputs downloads all the inputs for this target if we are building remotely.
-func downloadInputsIfNeeded(tid int, state *core.BuildState, target *core.BuildTarget) error {
-	if state.RemoteClient != nil {
-		state.LogBuildResult(tid, target.Label, core.TargetBuilding, "Downloading inputs...")
-		for input := range core.IterInputs(state.Graph, target, true, false) {
-			if l := input.Label(); l != nil {
-				dep := state.Graph.TargetOrDie(*l)
-				if s := dep.State(); s == core.BuiltRemotely || s == core.ReusedRemotely {
-					if err := state.RemoteClient.Download(dep); err != nil {
-						return err
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
 // calculateAndCheckRuleHash checks the output hash for a rule.
 func calculateAndCheckRuleHash(state *core.BuildState, target *core.BuildTarget) ([]byte, error) {
 	hash, err := state.TargetHasher.OutputHash(target)
 	if err != nil {
 		return nil, err
 	}
+
 	if err = checkRuleHashes(state, target, hash); err != nil {
 		if state.NeedHashesOnly && state.IsOriginalTargetOrParent(target) {
-			return nil, errStop
-		} else if state.VerifyHashes {
-			return nil, err
+			log.Info("Updated hash for %v: %v", target, string(hash))
 		} else {
+			if state.VerifyHashes {
+				return nil, err
+			}
 			log.Warning("%s", err)
 		}
 	}
@@ -812,8 +875,13 @@ func (h *targetHasher) SetHash(target *core.BuildTarget, hash []byte) {
 // outputHash calculates the output hash for a target, choosing an appropriate strategy.
 func (h *targetHasher) outputHash(target *core.BuildTarget) ([]byte, error) {
 	outs := target.FullOutputs()
-	// For compatibility, leave this on the default for SHA1 hashing.
-	if len(outs) == 1 && fs.FileExists(outs[0]) && h.State.Config.Build.HashFunction != "sha1" {
+
+	// We must combine for sha1 for backwards compatibility
+	// TODO(jpoole): remove this special case in v16
+	mustCombine := h.State.Config.Build.HashFunction == "sha1" && !h.State.Config.FeatureFlags.SingleSHA1Hash
+	combine := len(outs) != 1 || mustCombine
+
+	if !combine && fs.FileExists(outs[0]) {
 		return outputHash(target, outs, h.State.PathHasher, nil)
 	}
 	return outputHash(target, outs, h.State.PathHasher, h.State.PathHasher.NewHash)
@@ -824,14 +892,14 @@ func (h *targetHasher) outputHash(target *core.BuildTarget) ([]byte, error) {
 func outputHash(target *core.BuildTarget, outputs []string, hasher *fs.PathHasher, combine func() hash.Hash) ([]byte, error) {
 	if combine == nil {
 		// Must be a single output, just hash that directly.
-		return hasher.Hash(outputs[0], true, !target.IsFilegroup)
+		return hasher.Hash(outputs[0], true, !target.IsFilegroup, target.HashLastModified())
 	}
 	h := combine()
 	for _, filename := range outputs {
 		// NB. Always force a recalculation of the output hashes here. Memoisation is not
 		//     useful because by definition we are rebuilding a target, and can actively hurt
 		//     in cases where we compare the retrieved cache artifacts with what was there before.
-		h2, err := hasher.Hash(filename, true, !target.IsFilegroup)
+		h2, err := hasher.Hash(filename, true, !target.IsFilegroup, target.HashLastModified())
 		if err != nil {
 			return nil, err
 		}
@@ -849,10 +917,6 @@ func outputHash(target *core.BuildTarget, outputs []string, hasher *fs.PathHashe
 
 // Verify the hash of output files for a rule match the ones set on it.
 func checkRuleHashes(state *core.BuildState, target *core.BuildTarget, hash []byte) error {
-	// TODO(peterebden): can we genericise all of this to lean on the hashers we're getting
-	//                   from the state rather than so much hardcoding?
-	const sha1Len = 2 * sha1.Size // x2 because of hex-encoding
-	const sha256Len = 2 * sha256.Size
 	if len(target.Hashes) == 0 {
 		return nil // nothing to check
 	}
@@ -866,18 +930,25 @@ func checkRuleHashes(state *core.BuildState, target *core.BuildTarget, hash []by
 			return nil
 		}
 	}
-	if checkRuleHashesOfType(target, hashes, outputs, state.Hasher("sha1"), sha1.New, sha1Len) ||
-		(len(outputs) == 1 && checkRuleHashesOfType(target, hashes, outputs, state.Hasher("sha1"), nil, sha1Len)) ||
-		(len(outputs) != 1 && checkRuleHashesOfType(target, hashes, outputs, state.Hasher("sha256"), sha256.New, sha256Len)) ||
-		(len(outputs) == 1 && checkRuleHashesOfType(target, hashes, outputs, state.Hasher("sha256"), nil, sha256Len)) {
+	combine := len(outputs) != 1
+	validHashes, valid := checkRuleHashesOfType(target, hashes, outputs, state.OutputHashCheckers(), combine)
+	if valid {
 		return nil
 	}
-	if len(target.Hashes) == 1 {
-		return fmt.Errorf("Bad output hash for rule %s: was %s but expected %s",
-			target.Label, hashStr, target.Hashes[0])
+
+	// TODO(jpoole): remove this special case for sha1 once v16 is released
+	if !state.Config.FeatureFlags.SingleSHA1Hash {
+		// Always allow both the combined and non-combined sha1 hash for backwards compatibility
+		if _, valid := checkRuleHashesOfType(target, hashes, outputs, []*fs.PathHasher{state.Hasher("sha1")}, !combine); valid {
+			return nil
+		}
 	}
-	return fmt.Errorf("Bad output hash for rule %s: was %s but expected one of [%s]",
-		target.Label, hashStr, strings.Join(target.Hashes, ", "))
+	if len(target.Hashes) == 1 {
+		return fmt.Errorf("Bad output hash for rule %s, expected %s, but was: \n\t%s",
+			target.Label, target.Hashes[0], strings.Join(validHashes, "\n\t"))
+	}
+	return fmt.Errorf("Bad output hash for rule %s, expected on of: \n\t%s\nbut was \n\t%s",
+		target.Label, strings.Join(target.Hashes, "\n\t"), strings.Join(validHashes, "\n\t"))
 }
 
 // checkRuleHashesOfType checks any hashes on this rule of a single type.
@@ -885,16 +956,28 @@ func checkRuleHashes(state *core.BuildState, target *core.BuildTarget, hash []by
 // where a target has a single output so as not to double-hash it.
 // It is a bit fiddly, but is organised this way to avoid calculating hashes of
 // unused types unnecessarily since that could get quite expensive.
-func checkRuleHashesOfType(target *core.BuildTarget, hashes, outputs []string, hasher *fs.PathHasher, combine func() hash.Hash, size int) bool {
-	for _, h := range hashes {
-		if len(h) == size { // Check if the hash is of the right algorithm
-			bhash, _ := outputHash(target, outputs, hasher, combine)
-			if hex.EncodeToString(bhash) == h {
-				return true
+func checkRuleHashesOfType(target *core.BuildTarget, hashes, outputs []string, hashers []*fs.PathHasher, combine bool) ([]string, bool) {
+	validHashes := make([]string, len(hashers))
+
+	for i, hasher := range hashers {
+		var combiner func() hash.Hash
+		if combine {
+			combiner = hasher.NewHash
+		}
+		bhash, _ := outputHash(target, outputs, hasher, combiner)
+		hashString := hex.EncodeToString(bhash)
+		validHashes[i] = fmt.Sprintf("%s: %s", hasher.AlgoName(), hashString)
+
+		for _, h := range hashes {
+			if len(h) == hasher.Size()*2 { // Check if the hash is of the right algorithm; 2x because of hex encoding
+				if hashString == h {
+					return nil, true
+				}
 			}
 		}
 	}
-	return false
+
+	return validHashes, false
 }
 
 // Runs the post-build function for a target.
@@ -939,58 +1022,55 @@ func checkLicences(state *core.BuildState, target *core.BuildTarget) {
 // buildLinks builds links from the given target if it's labelled appropriately.
 // For example, Go targets may link themselves into plz-out/go/src etc.
 func buildLinks(state *core.BuildState, target *core.BuildTarget) {
-	buildLinksOfType(state, target, "link:", os.Symlink)
-	buildLinksOfType(state, target, "hlink:", os.Link)
+	buildLinksOfType(state, target, "link:", false, os.Symlink)
+	buildLinksOfType(state, target, "hlink:", false, os.Link)
+
+	// Directly link to the path of the label for these (i.e. don't append out to the destination dir)
+	buildLinksOfType(state, target, "dlink:", true, os.Symlink)
+	buildLinksOfType(state, target, "dhlink:", true, os.Link)
+
+	if state.Config.ShouldLinkGeneratedSources() && target.HasLabel("codegen") {
+		generate.LinkGeneratedSources(state, []core.BuildLabel{target.Label})
+	}
 }
 
-type linkFunc func(string, string) error
-
-func buildLinksOfType(state *core.BuildState, target *core.BuildTarget, prefix string, f linkFunc) {
+func buildLinksOfType(state *core.BuildState, target *core.BuildTarget, prefix string, direct bool, f fs.LinkFunc) {
 	if labels := target.PrefixedLabels(prefix); len(labels) > 0 {
-		env := core.BuildEnvironment(state, target, path.Join(core.RepoRoot, target.TmpDir()))
+		env := core.TargetEnvironment(state, target)
 		for _, dest := range labels {
 			destDir := path.Join(core.RepoRoot, os.Expand(dest, env.ReplaceEnvironment))
 			srcDir := path.Join(core.RepoRoot, target.OutDir())
 			for _, out := range target.Outputs() {
-				linkIfNotExists(path.Join(srcDir, out), path.Join(destDir, out), f)
+				if direct {
+					fs.LinkDestination(path.Join(srcDir, out), destDir, f)
+				} else {
+					fs.LinkIfNotExists(path.Join(srcDir, out), path.Join(destDir, out), f)
+				}
 			}
 		}
 	}
-}
-
-// linkIfNotExists creates dest as a link to src if it doesn't already exist.
-func linkIfNotExists(src, dest string, f linkFunc) {
-	if fs.PathExists(dest) {
-		return
-	}
-	fs.Walk(src, func(name string, isDir bool) error {
-		if !isDir {
-			fullDest := path.Join(dest, name[len(src):])
-			if err := fs.EnsureDir(fullDest); err != nil {
-				log.Warning("Failed to create directory for %s: %s", fullDest, err)
-			} else if err := f(name, fullDest); err != nil && !os.IsExist(err) {
-				log.Warning("Failed to create %s: %s", fullDest, err)
-			}
-		}
-		return nil
-	})
 }
 
 // fetchRemoteFile fetches a remote file from a URL.
 // This is a builtin for better efficiency and more control over the whole process.
 func fetchRemoteFile(state *core.BuildState, target *core.BuildTarget) error {
 	httpClientOnce.Do(func() {
+		httpClient = retryablehttp.NewClient()
+		httpClient.Logger = &cli.HTTPLogWrapper{Log: log}
+
 		if state.Config.Build.HTTPProxy != "" {
-			httpClient.Transport = &http.Transport{
+			httpClient.HTTPClient.Transport = &http.Transport{
 				Proxy: http.ProxyURL(state.Config.Build.HTTPProxy.AsURL()),
 			}
 		}
 
-		httpClient.Timeout = time.Duration(state.Config.Build.Timeout)
+		httpClient.HTTPClient.Timeout = time.Duration(state.Config.Build.Timeout)
+		httpClientLimiter = make(chan struct{}, state.Config.Build.ParallelDownloads)
 	})
-	if err := prepareDirectory(target.OutDir(), false); err != nil {
+
+	if err := prepareDirectory(state.ProcessExecutor, target.OutDir(), false); err != nil {
 		return err
-	} else if err := prepareDirectory(target.TmpDir(), false); err != nil {
+	} else if err := prepareDirectory(state.ProcessExecutor, target.TmpDir(), false); err != nil {
 		return err
 	}
 	var err error
@@ -1005,6 +1085,9 @@ func fetchRemoteFile(state *core.BuildState, target *core.BuildTarget) error {
 }
 
 func fetchOneRemoteFile(state *core.BuildState, target *core.BuildTarget, url string) error {
+	httpClientLimiter <- struct{}{}
+	defer func() { <-httpClientLimiter }()
+
 	env := core.BuildEnvironment(state, target, path.Join(core.RepoRoot, target.TmpDir()))
 	url = os.Expand(url, env.ReplaceEnvironment)
 	tmpPath := path.Join(target.TmpDir(), target.Outputs()[0])
@@ -1034,28 +1117,98 @@ func fetchOneRemoteFile(state *core.BuildState, target *core.BuildTarget, url st
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", fmt.Sprintf("please.build/%s", core.PleaseVersion))
-	resp, err := httpClient.Do(req)
+
+	if err := setHeaders(req, target, env); err != nil {
+		return err
+	}
+
+	rreq, err := retryablehttp.FromRequest(req)
+	if err != nil {
+		return err
+	}
+	resp, err := httpClient.Do(rreq)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		bs, _ := io.ReadAll(resp.Body)
+		if len(bs) != 0 {
+			log.Debug("Error retrieving %s: %s, Body:\n%s", url, resp.Status, string(bs))
+		}
 		return fmt.Errorf("Error retrieving %s: %s", url, resp.Status)
 	}
 	var r io.Reader = resp.Body
 	if length := resp.Header.Get("Content-Length"); length != "" {
 		if i, err := strconv.Atoi(length); err == nil {
+			atomic.StoreUint64(&target.FileSize, uint64(i))
 			r = &progressReader{Reader: resp.Body, Target: target, Total: float32(i)}
+			target.ShowProgress.SetTrue() // Required for it to actually display
 		}
 	}
-	target.ShowProgress = true // Required for it to actually display
 	h := state.PathHasher.NewHash()
 	if _, err := io.Copy(io.MultiWriter(f, h), r); err != nil {
 		return err
 	}
 	state.PathHasher.SetHash(tmpPath, h.Sum(nil))
 	return nil
+}
+
+// setHeaders sets up all the headers we should send on remote_file() requests, including User-Agent and any user
+// defined ones.
+func setHeaders(req *http.Request, target *core.BuildTarget, env core.BuildEnv) error {
+	req.Header.Set("User-Agent", fmt.Sprintf("please.build/%s", core.PleaseVersion))
+
+	param := func(str string) (string, string) {
+		if !strings.HasPrefix(str, "remote_file:") {
+			return "", ""
+		}
+		str = strings.TrimPrefix(str, "remote_file:")
+		i := strings.IndexRune(str, ':')
+		return str[:i], str[(i + 1):]
+	}
+
+	userName := ""
+	password := ""
+	for _, l := range target.Labels {
+		param, value := param(l)
+		switch param {
+		case "":
+			continue
+		case "header":
+			k, v := header(value)
+			v = os.Expand(v, env.ReplaceEnvironment)
+			req.Header.Set(k, v)
+		case "secret_header":
+			k, v := header(value)
+			b, err := os.ReadFile(fs.ExpandHomePath(v))
+			if err != nil {
+				return fmt.Errorf("failed to read secret file: %v", err)
+			}
+
+			req.Header.Set(k, string(b))
+		case "username":
+			userName = value
+		case "password_file":
+			p, err := os.ReadFile(fs.ExpandHomePath(value))
+			if err != nil {
+				return fmt.Errorf("failed to read password file: %v", err)
+			}
+			password = string(p)
+		default:
+			return fmt.Errorf("unknown remote file label: %v", l)
+		}
+	}
+
+	if userName != "" || password != "" {
+		req.SetBasicAuth(userName, password)
+	}
+	return nil
+}
+
+func header(str string) (string, string) {
+	i := strings.IndexRune(str, ':')
+	return str[:i], str[(i + 1):]
 }
 
 // A progressReader tracks progress from a HTTP response and marks it on the given target.
@@ -1069,7 +1222,7 @@ type progressReader struct {
 func (r *progressReader) Read(b []byte) (int, error) {
 	n, err := r.Reader.Read(b)
 	r.Done += float32(n)
-	r.Target.Progress = 100.0 * r.Done / r.Total
+	r.Target.Progress.Store(100.0 * r.Done / r.Total)
 	return n, err
 }
 

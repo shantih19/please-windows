@@ -147,8 +147,8 @@ func mustSourceHash(state *core.BuildState, target *core.BuildTarget) []byte {
 // Calculate the hash of all sources of this rule
 func sourceHash(state *core.BuildState, target *core.BuildTarget) ([]byte, error) {
 	h := sha1.New()
-	for source := range core.IterSources(state.Graph, target, false) {
-		result, err := state.PathHasher.Hash(source.Src, false, true)
+	for source := range core.IterSources(state, state.Graph, target, false) {
+		result, err := state.PathHasher.Hash(source.Src, false, true, false)
 		if err != nil {
 			return nil, err
 		}
@@ -157,7 +157,7 @@ func sourceHash(state *core.BuildState, target *core.BuildTarget) ([]byte, error
 	}
 	for _, tool := range target.AllTools() {
 		for _, path := range tool.FullPaths(state.Graph) {
-			result, err := state.PathHasher.Hash(path, false, true)
+			result, err := state.PathHasher.Hash(path, false, true, false)
 			if err != nil {
 				return nil, err
 			}
@@ -211,9 +211,7 @@ func ruleHash(state *core.BuildState, target *core.BuildTarget, runtime bool) []
 	for _, licence := range target.Licences {
 		h.Write([]byte(licence))
 	}
-	for _, output := range target.TestOutputs {
-		h.Write([]byte(output))
-	}
+
 	for _, output := range target.OptionalOutputs {
 		h.Write([]byte(output))
 	}
@@ -224,26 +222,18 @@ func ruleHash(state *core.BuildState, target *core.BuildTarget, runtime bool) []
 		h.Write([]byte(secret))
 	}
 	hashBool(h, target.IsBinary)
-	hashBool(h, target.IsTest)
+	hashOptionalBool(h, target.IsSubrepo)
 	hashOptionalBool(h, target.Sandbox)
 
 	// Note that we only hash the current command here; whatever's set in commands that we're not going
 	// to run is uninteresting to us.
 	h.Write([]byte(target.GetCommand(state)))
 
-	if runtime {
-		// Similarly, we only hash the current command here again.
-		h.Write([]byte(target.GetTestCommand(state)))
-		for _, datum := range target.AllData() {
-			h.Write([]byte(datum.String()))
-		}
-		hashOptionalBool(h, target.TestSandbox)
-	}
-
 	hashBool(h, target.NeedsTransitiveDependencies)
 	hashBool(h, target.OutputIsComplete)
 	hashBool(h, target.Stamp)
 	hashBool(h, target.IsFilegroup)
+	hashBool(h, target.IsTextFile)
 	hashBool(h, target.IsRemoteFile)
 	hashBool(h, target.Local)
 	hashOptionalBool(h, target.ExitOnError)
@@ -278,10 +268,37 @@ func ruleHash(state *core.BuildState, target *core.BuildTarget, runtime bool) []
 		h.Write([]byte(o))
 	}
 
-	for ep, out := range target.EntryPoints {
-		h.Write([]byte(ep + "=" + out))
+	hashMap(h, target.EntryPoints)
+	hashMap(h, target.Env)
+
+	h.Write([]byte(target.FileContent))
+
+	// Hash the test and runtime fields
+	if runtime {
+		for _, datum := range target.AllData() {
+			h.Write([]byte(datum.String()))
+		}
+		if target.IsTest() {
+			for _, output := range target.Test.Outputs {
+				h.Write([]byte(output))
+			}
+			hashOptionalBool(h, target.Test.Sandbox)
+			h.Write([]byte(target.GetTestCommand(state)))
+		}
 	}
+
 	return h.Sum(nil)
+}
+
+func hashMap(writer hash.Hash, eps map[string]string) {
+	keys := make([]string, 0, len(eps))
+	for ep := range eps {
+		keys = append(keys, ep)
+	}
+	sort.Strings(keys)
+	for _, ep := range keys {
+		writer.Write([]byte(ep + "=" + eps[ep]))
+	}
 }
 
 func hashBool(writer hash.Hash, b bool) {
@@ -456,8 +473,8 @@ func RuntimeHash(state *core.BuildState, target *core.BuildTarget, testRun int) 
 	hash := append(RuleHash(state, target, true, false), RuleHash(state, target, true, true)...)
 	hash = append(hash, state.Hashes.Config...)
 	h := sha1.New()
-	for source := range core.IterRuntimeFiles(state.Graph, target, true, testRun) {
-		result, err := state.PathHasher.Hash(source.Src, false, true)
+	for source := range core.IterRuntimeFiles(state.Graph, target, true, target.TestDir(testRun)) {
+		result, err := state.PathHasher.Hash(source.Src, false, true, false)
 		if err != nil {
 			return result, err
 		}
@@ -480,14 +497,14 @@ func PrintHashes(state *core.BuildState, target *core.BuildTarget) {
 	fmt.Printf("  Source: %s\n", b64(mustSourceHash(state, target)))
 	// Note that the logic here mimics sourceHash, but I don't want to pollute that with
 	// optional printing nonsense since it's on our hot path.
-	for source := range core.IterSources(state.Graph, target, false) {
-		fmt.Printf("  Source: %s: %s\n", source.Src, b64(state.PathHasher.MustHash(source.Src)))
+	for source := range core.IterSources(state, state.Graph, target, false) {
+		fmt.Printf("  Source: %s: %s\n", source.Src, b64(state.PathHasher.MustHash(source.Src, target.HashLastModified())))
 	}
 	for _, tool := range target.AllTools() {
-		if label := tool.Label(); label != nil {
-			fmt.Printf("    Tool: %s: %s\n", *label, b64(mustShortTargetHash(state, state.Graph.TargetOrDie(*label))))
+		if label, ok := tool.Label(); ok {
+			fmt.Printf("    Tool: %s: %s\n", label, b64(mustShortTargetHash(state, state.Graph.TargetOrDie(label))))
 		} else {
-			fmt.Printf("    Tool: %s: %s\n", tool, b64(state.PathHasher.MustHash(tool.FullPaths(state.Graph)[0])))
+			fmt.Printf("    Tool: %s: %s\n", tool, b64(state.PathHasher.MustHash(tool.FullPaths(state.Graph)[0], target.HashLastModified())))
 		}
 	}
 }
@@ -499,7 +516,7 @@ func secretHash(state *core.BuildState, target *core.BuildTarget) ([]byte, error
 	}
 	h := sha1.New()
 	for _, secret := range target.Secrets {
-		ph, err := state.PathHasher.Hash(secret, false, false)
+		ph, err := state.PathHasher.Hash(secret, false, false, false)
 		if err != nil && os.IsNotExist(err) {
 			return noSecrets, nil // Not having the secrets is not an error yet.
 		} else if err != nil {

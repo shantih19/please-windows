@@ -91,42 +91,46 @@ func TestExpandOriginalLabelsOrdering(t *testing.T) {
 	assert.Equal(t, expected, state.ExpandOriginalLabels())
 }
 
-func TestComparePendingTasks(t *testing.T) {
-	p := func(taskType taskType) pendingTask { return pendingTask{Type: taskType} }
-	// NB. "Higher priority" means the task comes first, does not refer to numeric values.
-	assertHigherPriority := func(a, b taskType) {
-		// relationship should be commutative
-		assert.True(t, p(a).Compare(p(b)) < 0)
-		assert.True(t, p(b).Compare(p(a)) > 0)
-	}
-	assertEqualPriority := func(a, b taskType) {
-		assert.True(t, p(a).Compare(p(b)) == 0)
-		assert.True(t, p(b).Compare(p(a)) == 0)
-	}
+func TestAddTargetFilegroupPackageOutputs(t *testing.T) {
+	state := NewDefaultBuildState()
 
-	assertHigherPriority(SubincludeBuild, SubincludeParse)
-	assertHigherPriority(SubincludeParse, Build)
-	assertHigherPriority(SubincludeBuild, Build)
-	assertEqualPriority(Build, Parse)
-	assertEqualPriority(Build, Test)
-	assertEqualPriority(Parse, Test)
-	assertHigherPriority(Build, Stop)
-	assertHigherPriority(Test, Stop)
-	assertHigherPriority(Parse, Stop)
+	pkg := NewPackage("src/core")
+	target := NewBuildTarget(ParseBuildLabel("//src/core:test", ""))
+	target.IsFilegroup = true
+	target.AddSource(NewFileLabel("file.txt", pkg))
+	pkg.AddTarget(target)
 
-	// sanity check
-	assertEqualPriority(SubincludeBuild, SubincludeBuild)
-	assertEqualPriority(SubincludeParse, SubincludeParse)
-	assertEqualPriority(Build, Build)
-	assertEqualPriority(Parse, Parse)
-	assertEqualPriority(Test, Test)
-	assertEqualPriority(Stop, Stop)
+	state.AddTarget(pkg, target)
+	assert.Len(t, pkg.Outputs, 1)
+	// This tests that the output shouldn't include the package name
+	_, exists := pkg.Outputs["file.txt"]
+	assert.True(t, exists)
+}
+
+func TestAddDepsToTarget(t *testing.T) {
+	state := NewDefaultBuildState()
+	_, builds, _ := state.TaskQueues()
+	pkg := NewPackage("src/core")
+	target1 := addTargetDeps(state, pkg, "//src/core:target1", "//src/core:target2")
+	target2 := addTargetDeps(state, pkg, "//src/core:target2")
+	state.Graph.AddPackage(pkg)
+	state.QueueTarget(target1.Label, OriginalTarget, false)
+	task := <-builds
+	assert.Equal(t, Task{Label: target2.Label}, task)
+	// Now simulate target2 being built and adding a new dep to target1 in its post-build function.
+	target3 := addTargetDeps(state, pkg, "//src/core:target3")
+	target1.AddDependency(target3.Label)
+	target2.FinishBuild()
+	task = <-builds
+	assert.Equal(t, Task{Label: target3.Label}, task)
 }
 
 func addTarget(state *BuildState, name string, labels ...string) {
 	target := NewBuildTarget(ParseBuildLabel(name, ""))
 	target.Labels = labels
-	target.IsTest = strings.HasSuffix(name, "_test")
+	if strings.HasSuffix(name, "_test") {
+		target.Test = new(TestFields)
+	}
 	pkg := state.Graph.PackageByLabel(target.Label)
 	if pkg == nil {
 		pkg = NewPackage(target.Label.PackageName)
@@ -134,4 +138,30 @@ func addTarget(state *BuildState, name string, labels ...string) {
 	}
 	pkg.AddTarget(target)
 	state.Graph.AddTarget(target)
+}
+
+func addTargetDeps(state *BuildState, pkg *Package, name string, deps ...string) *BuildTarget {
+	target := NewBuildTarget(ParseBuildLabel(name, ""))
+	for _, d := range deps {
+		target.AddDependency(ParseBuildLabel(d, ""))
+	}
+	pkg.AddTarget(target)
+	state.Graph.AddTarget(target)
+	return target
+}
+
+func TestCopyPlugin(t *testing.T) {
+	plugin := &Plugin{
+		ExtraValues: map[string][]string{
+			"foo": {"foo"},
+		},
+	}
+
+	newPlugin := plugin.copyPlugin()
+
+	assert.False(t, plugin == newPlugin)
+
+	newPlugin.ExtraValues["foo"] = []string{"bar"}
+
+	assert.NotEqual(t, plugin.ExtraValues["foo"], newPlugin.ExtraValues["foo"])
 }

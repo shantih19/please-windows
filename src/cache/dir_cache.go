@@ -168,7 +168,7 @@ func (cache *dirCache) storeFile(target *core.BuildTarget, out, cacheDir string)
 		log.Warning("Failed to setup cache directory: %s", err)
 		return 0
 	}
-	if err := fs.RecursiveLink(outFile, cachedFile, target.OutMode()); err != nil {
+	if err := fs.RecursiveLink(outFile, cachedFile); err != nil {
 		// Cannot hardlink files into the cache, must copy them for reals.
 		log.Warning("Failed to store cache file %s: %s", cachedFile, err)
 	}
@@ -214,7 +214,7 @@ func (cache *dirCache) retrieveFiles(target *core.BuildTarget, cacheDir string, 
 		}
 		cachedOut := path.Join(cacheDir, out)
 		log.Debug("Retrieving %s: %s from dir cache...", target.Label, cachedOut)
-		if err := fs.RecursiveLink(cachedOut, realOut, target.OutMode()); err != nil {
+		if err := fs.RecursiveLink(cachedOut, realOut); err != nil {
 			return false, err
 		}
 	}
@@ -316,7 +316,7 @@ func (cache *dirCache) getFullPath(target *core.BuildTarget, key []byte, extra, 
 	if !cache.Compress {
 		extra = ""
 	} else {
-		extra = strings.Replace(extra, "/", "_", -1)
+		extra = strings.ReplaceAll(extra, "/", "_")
 	}
 	// NB. Is very important to use a padded encoding here so lengths are consistent when cleaning.
 	return path.Join(cache.Dir, target.Label.PackageName, target.Label.Name, base64.URLEncoding.EncodeToString(key)) + extra + suffix + cache.Suffix

@@ -1,9 +1,11 @@
 package asp
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseBasic(t *testing.T) {
@@ -36,9 +38,10 @@ func TestParseDefaultArguments(t *testing.T) {
 	assert.Equal(t, "name", args[0].Name)
 	assert.Equal(t, "\"name\"", args[0].Value.Val.String)
 	assert.Equal(t, "timeout", args[1].Name)
-	assert.Equal(t, 10, args[1].Value.Val.Int.Int)
+	assert.True(t, args[1].Value.Val.IsInt)
+	assert.Equal(t, 10, args[1].Value.Val.Int)
 	assert.Equal(t, "args", args[2].Name)
-	assert.Equal(t, "None", args[2].Value.Val.Bool)
+	assert.True(t, args[2].Value.Val.None)
 
 	// Test for Endpos
 	assert.Equal(t, 9, statements[0].EndPos.Column)
@@ -105,7 +108,7 @@ func TestParseAssignments(t *testing.T) {
 	assert.NotNil(t, ass)
 	assert.Equal(t, 3, len(ass.Items))
 	assert.Equal(t, "\"mickey\"", ass.Items[0].Key.Val.String)
-	assert.Equal(t, 3, ass.Items[0].Value.Val.Int.Int)
+	assert.Equal(t, 3, ass.Items[0].Value.Val.Int)
 	assert.Equal(t, "\"donald\"", ass.Items[1].Key.Val.String)
 	assert.Equal(t, "\"sora\"", ass.Items[1].Value.Val.String)
 	assert.Equal(t, "\"goofy\"", ass.Items[2].Key.Val.String)
@@ -130,7 +133,7 @@ func TestForStatement(t *testing.T) {
 	assert.Equal(t, "LANGUAGES", statements[1].For.Expr.Val.Ident.Name)
 	assert.Equal(t, 2, len(statements[1].For.Statements))
 
-	//Test for Endpos
+	// Test for Endpos
 	assert.Equal(t, 2, statements[0].EndPos.Column)
 	assert.Equal(t, 4, statements[0].EndPos.Line)
 	assert.Equal(t, 6, statements[1].EndPos.Column)
@@ -161,7 +164,7 @@ func TestOperators(t *testing.T) {
 	assert.Equal(t, 1, len(call.Arguments[0].Value.Val.List.Values))
 	assert.Equal(t, "\"*.go\"", call.Arguments[0].Value.Val.List.Values[0].Val.String)
 
-	//Test for Endpos
+	// Test for Endpos
 	assert.Equal(t, 2, statements[0].EndPos.Column)
 	assert.Equal(t, 4, statements[0].EndPos.Line)
 }
@@ -179,7 +182,7 @@ func TestIndexing(t *testing.T) {
 	assert.NotNil(t, statements[1].Ident.Action.Assign)
 	assert.Equal(t, "x", statements[1].Ident.Action.Assign.Val.Ident.Name)
 	assert.Equal(t, 1, len(statements[1].Ident.Action.Assign.Val.Slices))
-	assert.Equal(t, 2, statements[1].Ident.Action.Assign.Val.Slices[0].Start.Val.Int.Int)
+	assert.Equal(t, 2, statements[1].Ident.Action.Assign.Val.Slices[0].Start.Val.Int)
 	assert.Equal(t, "", statements[1].Ident.Action.Assign.Val.Slices[0].Colon)
 	assert.Nil(t, statements[1].Ident.Action.Assign.Val.Slices[0].End)
 
@@ -187,15 +190,15 @@ func TestIndexing(t *testing.T) {
 	assert.NotNil(t, statements[2].Ident.Action.Assign)
 	assert.Equal(t, "x", statements[2].Ident.Action.Assign.Val.Ident.Name)
 	assert.Equal(t, 1, len(statements[2].Ident.Action.Assign.Val.Slices))
-	assert.Equal(t, 1, statements[2].Ident.Action.Assign.Val.Slices[0].Start.Val.Int.Int)
+	assert.Equal(t, 1, statements[2].Ident.Action.Assign.Val.Slices[0].Start.Val.Int)
 	assert.Equal(t, ":", statements[2].Ident.Action.Assign.Val.Slices[0].Colon)
-	assert.Equal(t, -1, statements[2].Ident.Action.Assign.Val.Slices[0].End.Val.Int.Int)
+	assert.Equal(t, -1, statements[2].Ident.Action.Assign.Val.Slices[0].End.Val.Int)
 
 	assert.Equal(t, "a", statements[3].Ident.Name)
 	assert.NotNil(t, statements[3].Ident.Action.Assign)
 	assert.Equal(t, "x", statements[3].Ident.Action.Assign.Val.Ident.Name)
 	assert.Equal(t, 1, len(statements[3].Ident.Action.Assign.Val.Slices))
-	assert.Equal(t, 2, statements[3].Ident.Action.Assign.Val.Slices[0].Start.Val.Int.Int)
+	assert.Equal(t, 2, statements[3].Ident.Action.Assign.Val.Slices[0].Start.Val.Int)
 	assert.Equal(t, ":", statements[3].Ident.Action.Assign.Val.Slices[0].Colon)
 	assert.Nil(t, statements[3].Ident.Action.Assign.Val.Slices[0].End)
 
@@ -205,7 +208,7 @@ func TestIndexing(t *testing.T) {
 	assert.Equal(t, 1, len(statements[4].Ident.Action.Assign.Val.Slices))
 	assert.Nil(t, statements[4].Ident.Action.Assign.Val.Slices[0].Start)
 	assert.Equal(t, ":", statements[4].Ident.Action.Assign.Val.Slices[0].Colon)
-	assert.Equal(t, 2, statements[4].Ident.Action.Assign.Val.Slices[0].End.Val.Int.Int)
+	assert.Equal(t, 2, statements[4].Ident.Action.Assign.Val.Slices[0].End.Val.Int)
 
 	assert.Equal(t, "c", statements[5].Ident.Name)
 	assert.NotNil(t, statements[5].Ident.Action.Assign)
@@ -215,7 +218,7 @@ func TestIndexing(t *testing.T) {
 	assert.Equal(t, "", statements[5].Ident.Action.Assign.Val.Slices[0].Colon)
 	assert.Nil(t, statements[5].Ident.Action.Assign.Val.Slices[0].End)
 
-	//Test for Endpos
+	// Test for Endpos
 	assert.Equal(t, 11, statements[0].EndPos.Column)
 	assert.Equal(t, 1, statements[0].EndPos.Line)
 	assert.Equal(t, 9, statements[1].EndPos.Column)
@@ -243,7 +246,7 @@ func TestIfStatement(t *testing.T) {
 	assert.Equal(t, 1, len(ifs.Statements))
 	assert.Equal(t, "genrule", ifs.Statements[0].Ident.Name)
 
-	//Test for Endpos
+	// Test for Endpos
 	assert.Equal(t, 6, statements[0].EndPos.Column)
 	assert.Equal(t, 4, statements[0].EndPos.Line)
 }
@@ -265,7 +268,7 @@ func TestDoubleUnindent(t *testing.T) {
 	assert.Equal(t, 1, len(for2.Statements))
 	assert.Equal(t, "genrule", for2.Statements[0].Ident.Name)
 
-	//Test for Endpos
+	// Test for Endpos
 	assert.Equal(t, 10, statements[0].EndPos.Column)
 	assert.Equal(t, 5, statements[0].EndPos.Line)
 }
@@ -283,7 +286,7 @@ func TestInlineIf(t *testing.T) {
 	assert.NotNil(t, ass.If)
 	assert.Equal(t, "y", ass.If.Condition.Val.Ident.Name)
 	assert.EqualValues(t, Is, ass.If.Condition.Op[0].Op)
-	assert.Equal(t, "None", ass.If.Condition.Op[0].Expr.Val.Bool)
+	assert.True(t, ass.If.Condition.Op[0].Expr.Val.None)
 	assert.NotNil(t, ass.If.Else.Val.List)
 	assert.Equal(t, 1, len(ass.If.Else.Val.List.Values))
 
@@ -478,20 +481,47 @@ func TestOptimise(t *testing.T) {
 }
 
 func TestMultilineStringQuotes(t *testing.T) {
-	statements, err := newParser().parse("src/parse/asp/test_data/multiline_string_quotes.build")
-	assert.NoError(t, err)
-	assert.Equal(t, 1, len(statements))
-	assert.NotNil(t, statements[0].Ident)
-	assert.NotNil(t, statements[0].Ident.Action)
-	assert.NotNil(t, statements[0].Ident.Action.Assign)
-	expected := `"
-#include "UnitTest++/UnitTest++.h"
-"`
-	assert.Equal(t, expected, statements[0].Ident.Action.Assign.Val.String)
+	for _, test := range []struct {
+		Path     string
+		Expected string
+	}{
+		{
+			Path: "src/parse/asp/test_data/multiline_string_single_in_single.build",
+			Expected: `"
+multiline string containing 'single quotes'
+"`,
+		},
+		{
+			Path: "src/parse/asp/test_data/multiline_string_double_in_single.build",
+			Expected: `"
+multiline string containing "double quotes"
+"`,
+		},
+		{
+			Path: "src/parse/asp/test_data/multiline_string_single_in_double.build",
+			Expected: `"
+multiline string containing 'single quotes'
+"`,
+		},
+		{
+			Path: "src/parse/asp/test_data/multiline_string_double_in_double.build",
+			Expected: `"
+multiline string containing "double quotes"
+"`,
+		},
+	} {
+		statements, err := newParser().parse(test.Path)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, len(statements))
+		assert.NotNil(t, statements[0].Ident)
+		assert.NotNil(t, statements[0].Ident.Action)
+		assert.NotNil(t, statements[0].Ident.Action.Assign)
+		assert.Equal(t, test.Expected, statements[0].Ident.Action.Assign.Val.String)
 
-	//TODO(BNM): It would be nice if we can get the actual EndPos for the multiline
-	//assert.Equal(t, 4, statements[0].EndPos.Column)
-	//assert.Equal(t, 3, statements[0].EndPos.Line)
+		// TODO(BNM): It would be nice if we can get the actual EndPos for the multiline
+		// assert.Equal(t, 4, statements[0].EndPos.Column)
+		// assert.Equal(t, 3, statements[0].EndPos.Line)
+	}
 }
 
 func TestExample0(t *testing.T) {
@@ -622,23 +652,23 @@ func TestConstantAssignments(t *testing.T) {
 func TestFStrings(t *testing.T) {
 	stmts, err := newParser().parse("src/parse/asp/test_data/fstring.build")
 	assert.NoError(t, err)
-	assert.Equal(t, 4, len(stmts))
+	assert.Equal(t, 6, len(stmts))
 
 	f := stmts[1].Ident.Action.Assign.Val.FString
 	assert.NotNil(t, f)
 	assert.Equal(t, "", f.Suffix)
 	assert.Equal(t, 1, len(f.Vars))
 	assert.Equal(t, "", f.Vars[0].Prefix)
-	assert.Equal(t, "x", f.Vars[0].Var)
+	assert.Equal(t, "x", f.Vars[0].Var[0])
 
 	f = stmts[2].Ident.Action.Assign.Val.FString
 	assert.NotNil(t, f)
 	assert.Equal(t, " fin", f.Suffix)
 	assert.Equal(t, 2, len(f.Vars))
 	assert.Equal(t, "x: ", f.Vars[0].Prefix)
-	assert.Equal(t, "x", f.Vars[0].Var)
+	assert.Equal(t, "x", f.Vars[0].Var[0])
 	assert.Equal(t, " y: ", f.Vars[1].Prefix)
-	assert.Equal(t, "y", f.Vars[1].Var)
+	assert.Equal(t, "y", f.Vars[1].Var[0])
 
 	// Test for Endpos
 	assert.Equal(t, 1, stmts[0].EndPos.Line)
@@ -658,4 +688,128 @@ func TestFuncReturnTypes(t *testing.T) {
 	assert.Equal(t, "str", stmts[0].FuncDef.Return)
 	assert.Equal(t, "config", stmts[2].FuncDef.Return)
 	assert.Equal(t, "dict", stmts[3].FuncDef.Return)
+}
+
+func TestFStringConcat(t *testing.T) {
+	t.Run("lhs string, rhs fstring", func(t *testing.T) {
+		lhs := &ValueExpression{
+			String: "\"this is the left hand side\"",
+		}
+
+		rhs := &ValueExpression{
+			FString: &FString{
+				Vars: []FStringVar{
+					{
+						Prefix: " this is the rhs: ",
+						Var:    []string{"rhs"},
+					},
+				},
+				Suffix: " suffix",
+			},
+		}
+
+		res := concatStrings(lhs, rhs)
+
+		require.NotNil(t, res.FString)
+		assert.Len(t, res.FString.Vars, 1)
+		assert.Equal(t, "this is the left hand side this is the rhs: ", res.FString.Vars[0].Prefix)
+		assert.Equal(t, "rhs", res.FString.Vars[0].Var[0])
+		assert.Equal(t, " suffix", res.FString.Suffix)
+	})
+
+	t.Run("lhs fstring, rhs string", func(t *testing.T) {
+		lhs := &ValueExpression{
+			FString: &FString{
+				Vars: []FStringVar{
+					{
+						Prefix: "this is the lhs: ",
+						Var:    []string{"lhs"},
+					},
+				},
+				Suffix: " suffix",
+			},
+		}
+
+		rhs := &ValueExpression{
+			String: "\" this is the right hand side\"",
+		}
+
+		res := concatStrings(lhs, rhs)
+
+		require.NotNil(t, res.FString)
+		assert.Len(t, res.FString.Vars, 1)
+		assert.Equal(t, "this is the lhs: ", res.FString.Vars[0].Prefix)
+		assert.Equal(t, "lhs", res.FString.Vars[0].Var[0])
+		assert.Equal(t, " suffix this is the right hand side", res.FString.Suffix)
+	})
+
+	t.Run("both fstring", func(t *testing.T) {
+		lhs := &ValueExpression{
+			FString: &FString{
+				Vars: []FStringVar{
+					{
+						Prefix: "this is the lhs: ",
+						Var:    []string{"lhs"},
+					},
+				},
+				Suffix: "lhs suffix",
+			},
+		}
+
+		rhs := &ValueExpression{
+			FString: &FString{
+				Vars: []FStringVar{
+					{
+						Prefix: " this is the rhs: ",
+						Var:    []string{"rhs"},
+					},
+				},
+				Suffix: " rhs suffix",
+			},
+		}
+		res := concatStrings(lhs, rhs)
+
+		require.NotNil(t, res.FString)
+		assert.Len(t, res.FString.Vars, 2)
+		assert.Equal(t, "this is the lhs: ", res.FString.Vars[0].Prefix)
+		assert.Equal(t, "lhs", res.FString.Vars[0].Var[0])
+
+		assert.Equal(t, "lhs suffix this is the rhs: ", res.FString.Vars[1].Prefix)
+		assert.Equal(t, "rhs", res.FString.Vars[1].Var[0])
+
+		assert.Equal(t, " rhs suffix", res.FString.Suffix)
+	})
+
+	t.Run("both strings", func(t *testing.T) {
+		lhs := &ValueExpression{
+			String: "\"this is the left hand side\"",
+		}
+
+		rhs := &ValueExpression{
+			String: "\" this is the right hand side\"",
+		}
+		res := concatStrings(lhs, rhs)
+
+		require.NotEmpty(t, res.String)
+		assert.Equal(t, "\"this is the left hand side this is the right hand side\"", res.String)
+	})
+}
+
+func TestFStringImplicitStringConcat(t *testing.T) {
+	str := "str('testing that we can carry these ' f'over {multiple} lines' r' \\n')"
+	prog, err := newParser().parseAndHandleErrors(strings.NewReader(strings.ReplaceAll(str, "\t", "")))
+	require.NoError(t, err)
+
+	fString := prog[0].Ident.Action.Call.Arguments[0].Value.Val.FString
+	assert.Equal(t, "testing that we can carry these over ", fString.Vars[0].Prefix)
+	assert.Equal(t, "multiple", fString.Vars[0].Var[0])
+	assert.Equal(t, " lines \\n", fString.Suffix)
+}
+
+// F strings should report a sensible error when the {} aren't complete
+func TestFStringIncompleteError(t *testing.T) {
+	str := "s = f'some {' '.join([])}'"
+	_, err := newParser().parseAndHandleErrors(strings.NewReader(str))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Unterminated brace in fstring")
 }

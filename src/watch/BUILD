@@ -4,11 +4,11 @@ go_library(
     visibility = ["PUBLIC"],
     deps = [
         "//src/cli",
+        "//src/cli/logging",
         "//src/core",
         "//src/fs",
+        "//src/process",
         "//src/run",
-        "//third_party/go:concurrent-map",
         "//third_party/go:fsnotify",
-        "//third_party/go:logging",
     ],
 )

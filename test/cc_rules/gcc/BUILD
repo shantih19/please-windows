@@ -1,6 +1,6 @@
 # So far just contains tests for the C++ build rules.
 
-subinclude("//build_defs:cc_embed_binary")
+subinclude("//test/build_defs:cc_embed_binary")
 
 package(default_namespace = "plz")
 
@@ -46,7 +46,7 @@ cc_shared_object(
     name = "so_test",
     srcs = ["so_test.cc"],
     out = "so_test.so",
-    linker_flags = ["-bundle -undefined dynamic_lookup"] if (CONFIG.OS == "darwin") else [],
+    linker_flags = ["-bundle -undefined dynamic_lookup"] if is_platform(os = "darwin") else [],
     pkg_config_cflags = ["python3"],
     deps = [
         ":embedded_files",

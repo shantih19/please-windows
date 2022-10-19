@@ -8,20 +8,18 @@ package gc
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"sort"
 	"strings"
 
-	"gopkg.in/op/go-logging.v1"
-
 	"github.com/thought-machine/please/src/cli"
+	"github.com/thought-machine/please/src/cli/logging"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/parse/asp"
 	"github.com/thought-machine/please/src/scm"
 )
 
-var log = logging.MustGetLogger("gc")
+var log = logging.Log
 
 type targetMap map[*core.BuildTarget]bool
 
@@ -29,7 +27,7 @@ type targetMap map[*core.BuildTarget]bool
 func GarbageCollect(state *core.BuildState, filter, targets, keepTargets []core.BuildLabel, keepLabels []string, conservative, targetsOnly, srcsOnly, noPrompt, dryRun, git bool) {
 	if targets, srcs := targetsToRemove(state.Graph, filter, targets, keepTargets, keepLabels, conservative); len(targets) > 0 {
 		if !srcsOnly {
-			fmt.Fprintf(os.Stderr, "Targets to remove (total %d of %d):\n", len(targets), state.Graph.Len())
+			fmt.Fprintf(os.Stderr, "Targets to remove (total %d of %d):\n", len(targets), len(state.Graph.AllTargets()))
 			for _, target := range targets {
 				fmt.Printf("  %s\n", target)
 			}
@@ -75,7 +73,7 @@ func GarbageCollect(state *core.BuildState, filter, targets, keepTargets []core.
 func targetsToRemove(graph *core.BuildGraph, filter, targets, targetsToKeep []core.BuildLabel, keepLabels []string, includeTests bool) (core.BuildLabels, []string) {
 	keepTargets := targetMap{}
 	for _, target := range graph.AllTargets() {
-		if (target.IsBinary && (!target.IsTest || includeTests)) || target.HasAnyLabel(keepLabels) || anyInclude(targetsToKeep, target.Label) || target.Label.Subrepo != "" {
+		if (target.IsBinary && (!target.IsTest() || includeTests)) || target.HasAnyLabel(keepLabels) || anyInclude(targetsToKeep, target.Label) || target.Label.Subrepo != "" {
 			log.Debug("GC root: %s", target.Label)
 			addTarget(graph, keepTargets, target)
 		}
@@ -108,7 +106,7 @@ func targetsToRemove(graph *core.BuildGraph, filter, targets, targetsToKeep []co
 		// This is a bit complex - need to identify any tests that are tests "on" the set of things
 		// we've already decided to keep.
 		for _, target := range graph.AllTargets() {
-			if target.IsTest {
+			if target.IsTest() {
 				for _, dep := range publicDependencies(graph, target) {
 					if keepTargets[dep] && !dep.TestOnly {
 						log.Debug("Keeping test %s on %s", target.Label, dep.Label)
@@ -126,7 +124,7 @@ func targetsToRemove(graph *core.BuildGraph, filter, targets, targetsToKeep []co
 	// we're not deleting could still use the sources of the targets that we are.
 	keepSrcs := map[string]bool{}
 	for target := range keepTargets {
-		for _, src := range target.AllLocalSources() {
+		for _, src := range target.AllLocalSourcePaths() {
 			keepSrcs[src] = true
 		}
 	}
@@ -135,7 +133,7 @@ func targetsToRemove(graph *core.BuildGraph, filter, targets, targetsToKeep []co
 	for _, target := range graph.AllTargets() {
 		if sibling := gcSibling(graph, target); !sibling.HasParent() && !keepTargets[sibling] && isIncluded(sibling, filter) {
 			ret = append(ret, target.Label)
-			for _, src := range target.AllLocalSources() {
+			for _, src := range target.AllLocalSourcePaths() {
 				if !keepSrcs[src] {
 					retSrcs = append(retSrcs, src)
 				}
@@ -215,7 +213,7 @@ func RewriteFile(state *core.BuildState, filename string, targets []string) erro
 	if err != nil {
 		return err
 	}
-	b, err := ioutil.ReadFile(filename)
+	b, err := os.ReadFile(filename)
 	if err != nil {
 		return err // This is very unlikely since we already read it once above, but y'know...
 	}
@@ -239,7 +237,7 @@ func RewriteFile(state *core.BuildState, filename string, targets []string) erro
 			lines2 = append(lines2, line)
 		}
 	}
-	return ioutil.WriteFile(filename, bytes.Join(lines2, []byte{'\n'}), 0664)
+	return os.WriteFile(filename, bytes.Join(lines2, []byte{'\n'}), 0664)
 }
 
 // removeTargets rewrites the given set of targets out of their BUILD files.

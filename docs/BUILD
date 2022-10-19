@@ -1,26 +1,34 @@
+subinclude("//docs/build_defs")
+
 deps = []
 
 for src in glob(
-    ["*.html"],
+    [
+        "*.html",
+        "milestones/*.html",
+    ],
     exclude = [
         "template.html",
         "lexicon*.html",
         "language.html",
+        "config.html",
+        "error.html",
     ],
 ):
-    templated_rule = genrule(
-        name = src.replace(".", "_"),
-        srcs = ["template.html", src],
-        outs = [src],
-        cmd = '"$TOOL" $SRCS > "$OUT"',
-        tools = [":templater"],
-    )
-    deps += [templated_rule]
+    deps += [html_template(name = src.replace(".", "_").replace("/", "_"), src = src)]
+
+html_template(
+    name = "codelabs_html",
+    src = "//docs/codelabs:templated_index",
+    output = "codelabs.html",
+)
 
 genrule(
     name = "rules",
     outs = ["rules.json"],
-    cmd = '"$TOOL" query rules > "$OUT"',
+    cmd = '"$TOOL" init && "$TOOL" query rules > "$OUT"',
+    local = True,
+    sandbox = False,
     tools = ["//src:please"],
 )
 
@@ -35,29 +43,45 @@ genrule(
     outs = ["lexicon.html"],
     cmd = [
         '"$TOOLS_LEX" > lexicon.html',
-        '"$TOOLS_TMPL" docs/template.html lexicon.html > tmp.html',
+        '"$TOOLS_TMPL" --template docs/template.html --in lexicon.html > tmp.html',
         'mv tmp.html "$OUT"',
     ],
     tools = {
-        "lex": [":lexicon_templater"],
-        "tmpl": [":templater"],
+        "lex": ["//docs/tools/lexicon_templater"],
+        "tmpl": ["//docs/tools/templater"],
+    },
+)
+
+genrule(
+    name = "config_html",
+    srcs = [
+        "config.html",
+        "template.html",
+    ],
+    outs = ["config.html"],
+    cmd = [
+        '"$TOOLS_CONFIG" > config.html',
+        '"$TOOLS_TMPL" --template docs/template.html --in config.html > tmp.html',
+        'mv tmp.html "$OUT"',
+    ],
+    tools = {
+        "config": ["//docs/tools/config_templater"],
+        "tmpl": ["//docs/tools/templater"],
     },
 )
 
 genrule(
     name = "language_html",
     srcs = {
-        "html": [
-            "template.html",
-            "language.html",
-        ],
+        "template": ["template.html"],
+        "html": ["language.html"],
         "grammar": ["grammar.txt"],
     },
     outs = ["language.html"],
-    cmd = '"$TOOLS_TEMPLATE" $SRCS_HTML | "$TOOLS_GRAMMAR" > "$OUT"',
+    cmd = '"$TOOLS_TEMPLATE" --template $SRCS_TEMPLATE --in $SRCS_HTML | "$TOOLS_GRAMMAR" > "$OUT"',
     tools = {
-        "grammar": [":grammar_templater"],
-        "template": [":templater"],
+        "grammar": ["//docs/tools/grammar_templater"],
+        "template": ["//docs/tools/templater"],
     },
 )
 
@@ -66,13 +90,20 @@ filegroup(
     srcs = glob(["images/*.png"]) + deps + [
         ":language_html",
         ":lexicon_html",
+        ":config_html",
+        "tachyons-4.12.0.min.css",
         "styles.css",
         "action.js",
+        "tabs.js",
+        "error.html",
         "images/thoughtmachine.png",
         "plz-recording.json",
         "//third_party/js:asciinema",
         "favicon",
+        ":codelabs_html",
     ],
+    visibility = ["//docs/..."],
+    deps = ["//docs/codelabs"],
 )
 
 #TODO(jpoole): unify these two once we switch to the new website
@@ -83,45 +114,50 @@ tarball(
     labels = ["hlink:plz-out/pkg"],
 )
 
+# This is used exclusively for the s3 website
 tarball(
     name = "deep-tarball",
-    srcs = [":docs"],
+    srcs = [
+        ":docs",
+        "//docs/codelabs",
+    ],
     out = "deep-docs.tar.gz",
     flatten = False,
     labels = ["hlink:plz-out/pkg"],
 )
 
-go_binary(
-    name = "templater",
-    srcs = ["template.go"],
+filegroup(
+    name = "template_html",
+    srcs = ["template.html"],
+    visibility = ["//docs/..."],
 )
 
-go_binary(
-    name = "lexicon_templater",
-    srcs = ["template_lexicon.go"],
-)
+results_files = [
+    "all_results",
+    "build_target_benchmark_all_results",
+]
 
-go_binary(
-    name = "grammar_templater",
-    srcs = ["template_grammar.go"],
+genrule(
+    name = "performance_data",
+    outs = [f"performance/{file}.jsonl" for file in results_files],
+    cmd = [f"curl https://please.build/performance/{file}.jsonl > performance/{file}.jsonl" for file in results_files],
 )
 
 # Convenient for popping open the docs in a browser after building (must use 'plz run').
 sh_cmd(
     name = "view",
-    cmd = "sensible-browser $(out_location :index_html)",
-    deps = [
+    cmd = "sensible-browser http://localhost:8080 && cd plz-out/gen/docs && python3 -m http.server 8080",
+    data = [
         ":docs",
-        ":index_html",
+        ":performance_data",
     ],
 )
 
-go_test(
-    name = "docs_test",
-    srcs = ["docs_test.go"],
-    data = [":docs"],
-    deps = [
-        "//third_party/go:net",
-        "//third_party/go:testify",
+sh_cmd(
+    name = "server",
+    cmd = "cd plz-out/gen/docs && python3 -m http.server 8080",
+    data = [
+        ":docs",
+        ":performance_data",
     ],
 )

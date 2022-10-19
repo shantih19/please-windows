@@ -2,22 +2,22 @@
 remote_file(
     name = "elan",
     binary = True,
-    hashes = ["6e97cb8530d3202e599486538a31d9ef63e0e19e5720e820d6cae4067e54c9aa"],
-    url = "https://github.com/thought-machine/please-servers/releases/download/v7.3.5/elan",
+    hashes = ["afabbbae6cb22045a7ee1d53edf0e298602ef6d41a3a2554e1e06555f9827eb4"],
+    url = "https://github.com/thought-machine/please-servers/releases/download/v9.6.9/elan",
 )
 
 remote_file(
     name = "mettle",
     binary = True,
-    hashes = ["36a71e9a15019dc4ab765a81f7ec16de0ad531ea7c41ed3e6491c40f50c56a72"],
-    url = "https://github.com/thought-machine/please-servers/releases/download/v7.3.5/mettle",
+    hashes = ["7f5b2914bd6bfa0461fc86ff14e086bf8fc42bff0f26ba766a7c633f8cd27ff2"],
+    url = "https://github.com/thought-machine/please-servers/releases/download/v9.6.9/mettle",
 )
 
 remote_file(
     name = "zeal",
     binary = True,
-    hashes = ["cecf4a386d1787613af5b910f354af120ac3f8e5ed49ca7c669166fe3b6fa4f4"],
-    url = "https://github.com/thought-machine/please-servers/releases/download/v7.3.5/zeal",
+    hashes = ["c28f1cdc52820c78cfb137066cbe26c88ffc02a954690e37bc175d23eb44711a"],
+    url = "https://github.com/thought-machine/please-servers/releases/download/v9.6.9/zeal",
 )
 
 sh_cmd(

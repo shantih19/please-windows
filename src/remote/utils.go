@@ -8,29 +8,32 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	treesdk "github.com/bazelbuild/remote-apis-sdks/go/pkg/tree"
-	"io/ioutil"
 	"os"
 	"path"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/chunker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
 	pb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/bazelbuild/remote-apis/build/bazel/semver"
-	"github.com/golang/protobuf/proto"
-	"github.com/golang/protobuf/ptypes"
-	"github.com/golang/protobuf/ptypes/timestamp"
 	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/encoding/gzip"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/fs"
+	"github.com/thought-machine/please/src/metrics"
+)
+
+var downloadErrors = metrics.NewCounter(
+	"remote",
+	"tree_digest_download_errors_total",
+	"Number of times the an error has been seen during a tree digest download",
 )
 
 // xattrName is the name we use to record attributes on files.
@@ -72,12 +75,13 @@ func (c *Client) setOutputs(target *core.BuildTarget, ar *pb.ActionResult) error
 	}
 	for _, d := range ar.OutputDirectories {
 		tree := &pb.Tree{}
-		if err := c.client.ReadProto(context.Background(), digest.NewFromProtoUnvalidated(d.TreeDigest), tree); err != nil {
+		if _, err := c.client.ReadProto(context.Background(), digest.NewFromProtoUnvalidated(d.TreeDigest), tree); err != nil {
+			downloadErrors.Inc()
 			return wrap(err, "Downloading tree digest for %s [%s]", d.Path, d.TreeDigest.Hash)
 		}
 
 		if outDir := maybeGetOutDir(d.Path, target.OutputDirectories); outDir != "" {
-			files, dirs, err := getOutputsForOutDir(target, outDir, tree)
+			files, dirs, err := c.getOutputsForOutDir(target, outDir, tree)
 			if err != nil {
 				return err
 			}
@@ -102,12 +106,12 @@ func (c *Client) setOutputs(target *core.BuildTarget, ar *pb.ActionResult) error
 	return nil
 }
 
-func getOutputsForOutDir(target *core.BuildTarget, outDir core.OutputDirectory, tree *pb.Tree) ([]*pb.FileNode, []*pb.DirectoryNode, error) {
+func (c *Client) getOutputsForOutDir(target *core.BuildTarget, outDir core.OutputDirectory, tree *pb.Tree) ([]*pb.FileNode, []*pb.DirectoryNode, error) {
 	files := make([]*pb.FileNode, 0, len(tree.Root.Files))
 	dirs := make([]*pb.DirectoryNode, 0, len(tree.Root.Directories))
 
 	if outDir.ShouldAddFiles() {
-		outs, err := treesdk.FlattenTree(tree, "")
+		outs, err := c.client.FlattenTree(tree, "")
 		if err != nil {
 			return nil, nil, err
 		}
@@ -150,11 +154,9 @@ func maybeGetOutDir(dir string, outDirs []core.OutputDirectory) core.OutputDirec
 
 // digestMessage calculates the digest of a protobuf in SHA-256 mode.
 func (c *Client) digestMessage(msg proto.Message) *pb.Digest {
-	d, err := digest.NewFromMessage(msg)
-	if err != nil {
-		panic(err)
-	}
-	return d.ToProto()
+	// Can't use NewFromMessage because remote-apis-sdks is still using the older interface.
+	blob, _ := proto.Marshal(msg)
+	return digest.NewFromBlob(blob).ToProto()
 }
 
 // wrapActionErr wraps an error with information about the action related to it.
@@ -186,7 +188,7 @@ func (c *Client) locallyCacheResults(target *core.BuildTarget, digest *pb.Digest
 	data, _ := proto.Marshal(ar)
 	metadata.RemoteAction = data
 	metadata.Timestamp = time.Now()
-	if err := c.mdStore.storeMetadata(c.metadataStoreKey(digest), metadata); err != nil {
+	if err := c.mdStore.storeMetadata(digest.Hash, metadata); err != nil {
 		log.Warningf("Failed to store build metadata for target %s: %v", target.Label, err)
 	}
 }
@@ -195,34 +197,18 @@ func (c *Client) locallyCacheResults(target *core.BuildTarget, digest *pb.Digest
 // Note that this does not handle any file data, only the actionresult metadata.
 func (c *Client) retrieveLocalResults(target *core.BuildTarget, digest *pb.Digest) (*core.BuildMetadata, *pb.ActionResult) {
 	if c.state.Cache != nil {
-		metadata, err := c.mdStore.retrieveMetadata(c.metadataStoreKey(digest))
+		metadata, err := c.mdStore.retrieveMetadata(digest.Hash)
 		if err != nil {
-			log.Warningf("Failed to retrieve stored matadata for target %s, %v", target.Label, err)
+			log.Warningf("Failed to retrieve stored metadata for target %s, %v", target.Label, err)
 		}
 		if metadata != nil && len(metadata.RemoteAction) > 0 {
 			ar := &pb.ActionResult{}
 			if err := proto.Unmarshal(metadata.RemoteAction, ar); err == nil {
-				if err := c.setOutputs(target, ar); err == nil {
-					return metadata, ar
-				}
+				return metadata, ar
 			}
 		}
 	}
 	return nil, nil
-}
-
-// metadataStoreKey returns the key we use to store the metadata of a target.
-// This is not the same as the digest hash since it includes the instance name (allowing them to be stored separately)
-func (c *Client) metadataStoreKey(digest *pb.Digest) string {
-	key, _ := hex.DecodeString(digest.Hash)
-	instance := c.state.Config.Remote.Instance
-	if len(instance) > len(key) {
-		instance = instance[len(key):]
-	}
-	for i := 0; i < len(instance); i++ {
-		key[i] ^= instance[i]
-	}
-	return hex.EncodeToString(key)
 }
 
 // outputsExist returns true if the outputs for this target exist and are up to date.
@@ -283,13 +269,6 @@ func printVer(v *semver.SemVer) string {
 	return msg
 }
 
-// toTime converts a protobuf timestamp into a time.Time.
-// It's like the ptypes one but we ignore errors (we don't generally care that much)
-func toTime(ts *timestamp.Timestamp) time.Time {
-	t, _ := ptypes.Timestamp(ts)
-	return t
-}
-
 // IsNotFound returns true if a given error is a "not found" error (which may be treated
 // differently, for example if trying to retrieve artifacts that may not be there).
 func IsNotFound(err error) bool {
@@ -330,31 +309,9 @@ func wrap(err error, msg string, args ...interface{}) error {
 // timeout returns either a build or test timeout from a target.
 func timeout(target *core.BuildTarget, test bool) time.Duration {
 	if test {
-		return target.TestTimeout
+		return target.Test.Timeout
 	}
 	return target.BuildTimeout
-}
-
-// outputs returns the outputs of a target, split arbitrarily and inaccurately
-// into files and directories.
-// After some discussion we are hoping that servers are permissive about this if
-// we get it wrong; we prefer to make an effort though as a minor nicety.
-func outputs(target *core.BuildTarget) (files, dirs []string) {
-	outs := target.Outputs()
-	files = make([]string, 0, len(outs))
-	for _, out := range outs {
-		out = target.GetTmpOutput(out)
-		if !strings.ContainsRune(path.Base(out), '.') && !strings.HasSuffix(out, "file") && !target.IsBinary {
-			dirs = append(dirs, out)
-		} else {
-			files = append(files, out)
-		}
-	}
-
-	for _, out := range target.OutputDirectories {
-		dirs = append(dirs, out.Dir())
-	}
-	return files, dirs
 }
 
 // A dirBuilder is for helping build up a tree of Directory protos.
@@ -407,10 +364,12 @@ func (b *dirBuilder) dir(dir, child string) *pb.Directory {
 	return d
 }
 
-// Root returns the root directory, calculates the digests of all others and uploads them
-// if the given channel is not nil.
-func (b *dirBuilder) Root(ch chan<- *chunker.Chunker) *pb.Directory {
-	b.dfs(".", ch)
+// Build "builds" the directory. It calculate the digests of all the items in the directory tree, and returns the root
+// directory. If ch is non-nil, it will upload the directory protos to ch. Build doesn't upload any of the actual files
+// in the directory tree, just the protos.
+func (b *dirBuilder) Build(ch chan<- *uploadinfo.Entry) *pb.Directory {
+	// Upload the directory structure
+	b.walk(".", ch)
 	return b.root
 }
 
@@ -432,7 +391,7 @@ func (b *dirBuilder) Node(name string) (*pb.DirectoryNode, *pb.FileNode) {
 }
 
 // Tree returns the tree rooted at a given directory name.
-// It does not calculate digests or upload, so call Root beforehand if that is needed.
+// It does not calculate digests or upload, so call Build beforehand if that is needed.
 func (b *dirBuilder) Tree(root string) *pb.Tree {
 	d := b.dir(root, "")
 	tree := &pb.Tree{Root: d}
@@ -448,38 +407,79 @@ func (b *dirBuilder) tree(tree *pb.Tree, root string, dir *pb.Directory) {
 	}
 }
 
-func (b *dirBuilder) dfs(name string, ch chan<- *chunker.Chunker) *pb.Digest {
+// Walk walks the directory tree calculating the digest. If ch is non-nil, it will also upload the direcory protos.
+// Walk does not upload the actual files in the tree, just the tree structure.
+func (b *dirBuilder) walk(name string, ch chan<- *uploadinfo.Entry) *pb.Digest {
 	dir := b.dirs[name]
 	for _, d := range dir.Directories {
 		if d.Digest == nil { // It's not nil if we're reusing outputs from an earlier call.
-			d.Digest = b.dfs(path.Join(name, d.Name), ch)
+			d.Digest = b.walk(path.Join(name, d.Name), ch)
 		}
 	}
 	// The protocol requires that these are sorted into lexicographic order. Not all servers
 	// necessarily care, but some do, and we should be compliant.
-	sort.Slice(dir.Files, func(i, j int) bool { return dir.Files[i].Name < dir.Files[j].Name })
-	sort.Slice(dir.Directories, func(i, j int) bool { return dir.Directories[i].Name < dir.Directories[j].Name })
-	sort.Slice(dir.Symlinks, func(i, j int) bool { return dir.Symlinks[i].Name < dir.Symlinks[j].Name })
-	chomk, _ := chunker.NewFromProto(dir, chunker.DefaultChunkSize)
-	if ch != nil {
-		ch <- chomk
+	files := dir.Files
+	dirs := dir.Directories
+	syms := dir.Symlinks
+	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	sort.Slice(dirs, func(i, j int) bool { return dirs[i].Name < dirs[j].Name })
+	sort.Slice(syms, func(i, j int) bool { return syms[i].Name < syms[j].Name })
+
+	// Ensure there are not duplicates in these slices.
+	last := ""
+	dir.Files = files[:0]
+	for _, f := range files {
+		if f.Name != last {
+			dir.Files = append(dir.Files, f)
+			last = f.Name
+		}
 	}
-	return chomk.Digest().ToProto()
+	dir.Directories = dirs[:0]
+	for _, d := range dirs {
+		if d.Name != last {
+			dir.Directories = append(dir.Directories, d)
+			last = d.Name
+		}
+	}
+	dir.Symlinks = syms[:0]
+	for _, s := range syms {
+		if s.Name != last {
+			dir.Symlinks = append(dir.Symlinks, s)
+			last = s.Name
+		}
+	}
+
+	entry, _ := uploadinfo.EntryFromProto(dir)
+	if ch != nil {
+		ch <- entry
+	}
+	return entry.Digest.ToProto()
 }
 
 // convertPlatform converts the platform entries from the config into a Platform proto.
-func convertPlatform(config *core.Configuration) *pb.Platform {
+func convertPlatform(properties []string) *pb.Platform {
 	platform := &pb.Platform{}
-	for _, p := range config.Remote.Platform {
+	for _, p := range properties {
 		if parts := strings.SplitN(p, "=", 2); len(parts) == 2 {
 			platform.Properties = append(platform.Properties, &pb.Platform_Property{
 				Name:  parts[0],
 				Value: parts[1],
 			})
 		} else {
-			log.Warning("Invalid config setting in remote.platform %s; will ignore", p)
+			log.Warning("Invalid platform property setting %s; will ignore", p)
 		}
 	}
+	return platform
+}
+
+// targetPlatformProperties returns the platform properties for a target, including any global ones.
+func (c *Client) targetPlatformProperties(target *core.BuildTarget) *pb.Platform {
+	labels := target.PrefixedLabels("remote-platform-property:")
+	if len(labels) == 0 {
+		return c.platform
+	}
+	platform := convertPlatform(labels)
+	platform.Properties = append(platform.Properties, c.platform.Properties...)
 	return platform
 }
 
@@ -522,19 +522,15 @@ func reencodeSRI(target *core.BuildTarget, h string) string {
 
 // dialOpts returns a set of dial options to apply based on the config.
 func (c *Client) dialOpts() ([]grpc.DialOption, error) {
-	// Set an arbitrarily large (400MB) max message size so it isn't a limitation.
-	callOpts := []grpc.CallOption{grpc.MaxCallRecvMsgSize(419430400)}
-	if c.state.Config.Remote.Gzip {
-		callOpts = append(callOpts, grpc.UseCompressor(gzip.Name))
-	}
 	opts := []grpc.DialOption{
 		grpc.WithStatsHandler(c.stats),
-		grpc.WithDefaultCallOptions(callOpts...),
+		// Set an arbitrarily large (400MB) max message size so it isn't a limitation.
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(419430400)),
 	}
 	if c.state.Config.Remote.TokenFile == "" {
 		return opts, nil
 	}
-	token, err := ioutil.ReadFile(c.state.Config.Remote.TokenFile)
+	token, err := os.ReadFile(c.state.Config.Remote.TokenFile)
 	if err != nil {
 		return opts, fmt.Errorf("Failed to load token from file: %s", err)
 	}
@@ -567,4 +563,18 @@ func (cred tokenCredProvider) GetRequestMetadata(ctx context.Context, uri ...str
 
 func (cred tokenCredProvider) RequireTransportSecurity() bool {
 	return false // Allow these to be provided over an insecure channel; this facilitates e.g. service meshes like Istio.
+}
+
+// contextWithMetadata returns a context with metadata corresponding to the given build target.
+func (c *Client) contextWithMetadata(target *core.BuildTarget) context.Context {
+	const key = "build.bazel.remote.execution.v2.requestmetadata-bin" // as defined by the proto
+	b, _ := proto.Marshal(&pb.RequestMetadata{
+		ActionId:                target.Label.String(),
+		CorrelatedInvocationsId: c.state.Config.Remote.BuildID,
+		ToolDetails: &pb.ToolDetails{
+			ToolName:    "please",
+			ToolVersion: core.PleaseVersion,
+		},
+	})
+	return metadata.NewOutgoingContext(context.Background(), metadata.Pairs(key, string(b)))
 }

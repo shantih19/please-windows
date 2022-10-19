@@ -5,7 +5,6 @@ package test
 import (
 	"encoding/xml"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 
@@ -55,7 +54,7 @@ func readTestResultsDir(outputDir string) ([][]byte, error) {
 	}
 	err := fs.Walk(outputDir, func(path string, isDir bool) error {
 		if !isDir {
-			fileResults, err := ioutil.ReadFile(path)
+			fileResults, err := os.ReadFile(path)
 			if err != nil {
 				return fmt.Errorf("Error parsing %s: %s", path, err)
 			}
@@ -85,7 +84,7 @@ func LoadPreviousFailures(filename string) ([]core.BuildLabel, []string) {
 	for _, suite := range junit.TestSuites {
 		if suite.Failures > 0 {
 			labels = append(labels, core.NewBuildLabel(
-				strings.Replace(suite.Package, ".", "/", -1), suite.Name))
+				strings.ReplaceAll(suite.Package, ".", "/"), suite.Name))
 			for _, c := range suite.TestCases {
 				if c.Failure != nil || c.Error != nil {
 					args = append(args, c.Name)

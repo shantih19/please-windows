@@ -18,12 +18,12 @@ type BuildInput interface {
 	FullPaths(graph *BuildGraph) []string
 	// LocalPaths returns paths within the local package
 	LocalPaths(graph *BuildGraph) []string
-	// Label returns the build label associated with this input, or nil if it doesn't have one (eg. it's just a file).
-	Label() *BuildLabel
+	// Label returns the build label associated with this input, or false if it doesn't have one.
+	Label() (BuildLabel, bool)
 	// nonOutputLabel returns the build label associated with this input, or nil if it doesn't have
 	// one or is a specific output of a rule.
 	// This is fiddly enough that we don't want to expose it outside the package right now.
-	nonOutputLabel() *BuildLabel
+	nonOutputLabel() (BuildLabel, bool)
 	// String returns a string representation of this input
 	String() string
 }
@@ -34,6 +34,12 @@ type FileLabel struct {
 	File string
 	// Name of the package
 	Package string
+}
+
+// MarshalText implements the encoding.TextMarshaler interface, which makes FileLabel
+// usable as map keys in JSON.
+func (label FileLabel) MarshalText() ([]byte, error) {
+	return []byte(label.String()), nil
 }
 
 // Paths returns a slice of paths to the files of this input.
@@ -52,12 +58,12 @@ func (label FileLabel) LocalPaths(graph *BuildGraph) []string {
 }
 
 // Label returns the build rule associated with this input. For a FileLabel it's always nil.
-func (label FileLabel) Label() *BuildLabel {
-	return nil
+func (label FileLabel) Label() (BuildLabel, bool) {
+	return BuildLabel{}, false
 }
 
-func (label FileLabel) nonOutputLabel() *BuildLabel {
-	return nil
+func (label FileLabel) nonOutputLabel() (BuildLabel, bool) {
+	return BuildLabel{}, false
 }
 
 // String returns a string representation of this input.
@@ -73,6 +79,12 @@ type SubrepoFileLabel struct {
 	Package string
 	// The full path, including the subrepo root.
 	FullPackage string
+}
+
+// MarshalText implements the encoding.TextMarshaler interface, which makes SubrepoFileLabel
+// usable as map keys in JSON.
+func (label SubrepoFileLabel) MarshalText() ([]byte, error) {
+	return []byte(label.String()), nil
 }
 
 // Paths returns a slice of paths to the files of this input.
@@ -91,12 +103,12 @@ func (label SubrepoFileLabel) LocalPaths(graph *BuildGraph) []string {
 }
 
 // Label returns the build rule associated with this input. For a SubrepoFileLabel it's always nil.
-func (label SubrepoFileLabel) Label() *BuildLabel {
-	return nil
+func (label SubrepoFileLabel) Label() (BuildLabel, bool) {
+	return BuildLabel{}, false
 }
 
-func (label SubrepoFileLabel) nonOutputLabel() *BuildLabel {
-	return nil
+func (label SubrepoFileLabel) nonOutputLabel() (BuildLabel, bool) {
+	return BuildLabel{}, false
 }
 
 // String returns a string representation of this input.
@@ -106,6 +118,7 @@ func (label SubrepoFileLabel) String() string {
 
 // NewFileLabel returns either a FileLabel or SubrepoFileLabel as appropriate.
 func NewFileLabel(src string, pkg *Package) BuildInput {
+	src = strings.TrimRight(src, "/")
 	if pkg.Subrepo != nil {
 		return SubrepoFileLabel{
 			File:        src,
@@ -119,6 +132,12 @@ func NewFileLabel(src string, pkg *Package) BuildInput {
 // SystemFileLabel represents an absolute system dependency, which is not managed by the build system.
 type SystemFileLabel struct {
 	Path string
+}
+
+// MarshalText implements the encoding.TextMarshaler interface, which makes SystemFileLabel
+// usable as map keys in JSON.
+func (label SystemFileLabel) MarshalText() ([]byte, error) {
+	return []byte(label.String()), nil
 }
 
 // Paths returns a slice of paths to the files of this input.
@@ -137,12 +156,12 @@ func (label SystemFileLabel) LocalPaths(graph *BuildGraph) []string {
 }
 
 // Label returns the build rule associated with this input. For a SystemFileLabel it's always nil.
-func (label SystemFileLabel) Label() *BuildLabel {
-	return nil
+func (label SystemFileLabel) Label() (BuildLabel, bool) {
+	return BuildLabel{}, false
 }
 
-func (label SystemFileLabel) nonOutputLabel() *BuildLabel {
-	return nil
+func (label SystemFileLabel) nonOutputLabel() (BuildLabel, bool) {
+	return BuildLabel{}, false
 }
 
 // String returns a string representation of this input.
@@ -154,6 +173,12 @@ func (label SystemFileLabel) String() string {
 type SystemPathLabel struct {
 	Name string
 	Path []string
+}
+
+// MarshalText implements the encoding.TextMarshaler interface, which makes SystemPathLabel
+// usable as map keys in JSON.
+func (label SystemPathLabel) MarshalText() ([]byte, error) {
+	return []byte(label.String()), nil
 }
 
 // Paths returns a slice of paths to the files of this input.
@@ -180,12 +205,12 @@ func (label SystemPathLabel) LocalPaths(graph *BuildGraph) []string {
 }
 
 // Label returns the build rule associated with this input. For a SystemPathLabel it's always nil.
-func (label SystemPathLabel) Label() *BuildLabel {
-	return nil
+func (label SystemPathLabel) Label() (BuildLabel, bool) {
+	return BuildLabel{}, false
 }
 
-func (label SystemPathLabel) nonOutputLabel() *BuildLabel {
-	return nil
+func (label SystemPathLabel) nonOutputLabel() (BuildLabel, bool) {
+	return BuildLabel{}, false
 }
 
 // String returns a string representation of this input.
@@ -199,6 +224,12 @@ func (label SystemPathLabel) String() string {
 type AnnotatedOutputLabel struct {
 	BuildLabel
 	Annotation string
+}
+
+// MarshalText implements the encoding.TextMarshaler interface, which makes AnnotatedOutputLabel
+// usable as map keys in JSON.
+func (label AnnotatedOutputLabel) MarshalText() ([]byte, error) {
+	return []byte(label.String()), nil
 }
 
 // Paths returns a slice of paths to the files of this input.
@@ -229,16 +260,19 @@ func (label AnnotatedOutputLabel) LocalPaths(graph *BuildGraph) []string {
 }
 
 // Label returns the build rule associated with this input. For a AnnotatedOutputLabel it's always non-nil.
-func (label AnnotatedOutputLabel) Label() *BuildLabel {
-	return &label.BuildLabel
+func (label AnnotatedOutputLabel) Label() (BuildLabel, bool) {
+	return label.BuildLabel, true
 }
 
-func (label AnnotatedOutputLabel) nonOutputLabel() *BuildLabel {
-	return nil
+func (label AnnotatedOutputLabel) nonOutputLabel() (BuildLabel, bool) {
+	return BuildLabel{}, false
 }
 
 // String returns a string representation of this input.
 func (label AnnotatedOutputLabel) String() string {
+	if label.Annotation == "" {
+		return label.BuildLabel.String()
+	}
 	return label.BuildLabel.String() + "|" + label.Annotation
 }
 
@@ -251,6 +285,24 @@ func MustParseNamedOutputLabel(target string, pkg *Package) BuildInput {
 		return AnnotatedOutputLabel{BuildLabel: label, Annotation: target[index+1:]}
 	}
 	return ParseBuildLabelContext(target, pkg)
+}
+
+// UnmarshalFlag unmarshals a build label from a command line flag. Implementation of flags.Unmarshaler interface.
+func (label *AnnotatedOutputLabel) UnmarshalFlag(value string) error {
+	annotation := ""
+	if strings.Count(value, "|") == 1 {
+		parts := strings.Split(value, "|")
+		value = parts[0]
+		annotation = parts[1]
+	}
+
+	l := &BuildLabel{}
+	if err := l.UnmarshalFlag(value); err != nil {
+		return err
+	}
+	label.BuildLabel = *l
+	label.Annotation = annotation
+	return nil
 }
 
 // A URLLabel represents a remote input that's defined by a URL.
@@ -272,12 +324,12 @@ func (label URLLabel) LocalPaths(graph *BuildGraph) []string {
 }
 
 // Label returns the build rule associated with this input. For a URLLabel it's always nil.
-func (label URLLabel) Label() *BuildLabel {
-	return nil
+func (label URLLabel) Label() (BuildLabel, bool) {
+	return BuildLabel{}, false
 }
 
-func (label URLLabel) nonOutputLabel() *BuildLabel {
-	return nil
+func (label URLLabel) nonOutputLabel() (BuildLabel, bool) {
+	return BuildLabel{}, false
 }
 
 // String returns a string representation of this input.

@@ -25,7 +25,11 @@ func parseFile2(filename string) (*scope, error) {
 	pkg := core.NewPackage("test/package")
 	pkg.Filename = "test/package/BUILD"
 	parser := NewParser(state)
-	parser.MustLoadBuiltins("builtins.build_defs", nil, rules.MustAsset("builtins.build_defs.gob"))
+	src, err := rules.ReadAsset("builtins.build_defs")
+	if err != nil {
+		panic(err)
+	}
+	parser.MustLoadBuiltins("builtins.build_defs", src)
 	statements, err := parser.parse(filename)
 	if err != nil {
 		panic(err)
@@ -34,7 +38,8 @@ func parseFile2(filename string) (*scope, error) {
 }
 
 // assertRecords asserts equality of a series of logging records.
-func assertRecords(t *testing.T, backend *logging.MemoryBackend, expected []record) { //nolint:unused
+func assertRecords(t *testing.T, backend *logging.MemoryBackend, expected []record) {
+	t.Helper()
 	actual := []record{}
 	for node := backend.Head(); node != nil; node = node.Next() {
 		actual = append(actual, record{node.Record.Level, node.Record.Message()})

@@ -3,29 +3,35 @@ package plzinit
 import (
 	"bufio"
 	"fmt"
-	"github.com/thought-machine/please/src/core"
 	"os"
 	"path"
 	"strings"
 
 	"github.com/thought-machine/please/src/cli"
+	"github.com/thought-machine/please/src/core"
 )
 
 const goConfig = `
 [go]
 ;gotool = ...
-;goroot - ... 
+;goroot - ...
 `
 
 // golangConfig prompts the user and returns the go config to add to the .plzconfig
-func golangConfig(dir string) string {
+func golangConfig(dir string, noPrompt bool) string {
 	goModule, moduleFound := findGoModule(dir)
+	config := goConfig
 
-	if !moduleFound && !cli.PromptYN("Would you like to setup Go in this repository", false) {
+	if noPrompt {
+		if moduleFound {
+			return config + fmt.Sprintf("importpath = %s\n", goModule)
+		}
 		return ""
 	}
 
-	config := goConfig
+	if !moduleFound {
+		return ""
+	}
 
 	goOnPath, _ := core.LookPath("go", core.DefaultPath)
 	if goOnPath == "" {
@@ -51,7 +57,7 @@ func golangConfig(dir string) string {
 		if !moduleFound {
 			fmt.Sprintln("You may also want to `go mod init " + importPath + "` for better IDE integration")
 		}
-		config += fmt.Sprintln("importpath = ", importPath)
+		config += fmt.Sprintf("importpath = %s\n", importPath)
 	} else {
 		config += fmt.Sprintln(";importpath = ...")
 	}

@@ -2,7 +2,6 @@ package asp
 
 import (
 	"io"
-	"io/ioutil"
 	"unicode"
 	"unicode/utf8"
 )
@@ -61,7 +60,7 @@ func NameOfReader(r io.Reader) string {
 func newLexer(r io.Reader) *lex {
 	// Read the entire file upfront to avoid bufio etc.
 	// This should work OK as long as BUILD files are relatively small.
-	b, err := ioutil.ReadAll(r)
+	b, err := io.ReadAll(r)
 	if err != nil {
 		fail(Position{Filename: NameOfReader(r)}, err.Error())
 	}
@@ -71,7 +70,7 @@ func newLexer(r io.Reader) *lex {
 		b = append(b, '\n')
 	}
 	l := &lex{
-		b:        append(b, 0, 0), // Null-terminating the buffer makes things easier later.
+		bytes:    append(b, 0, 0), // Null-terminating the buffer makes things easier later.
 		filename: NameOfReader(r),
 		indents:  []int{0},
 	}
@@ -85,13 +84,17 @@ func newLexer(r io.Reader) *lex {
 
 // A lex is a lexer for a single BUILD file.
 type lex struct {
-	b      []byte
-	i      int
-	line   int
-	col    int
+	// The raw bytes we're lexing
+	bytes []byte
+	// The current position of the lexer in the byte buffer
+	pos int
+	// The line and column we're on
+	line, col int
+	// The current level of indentation we're on in the file
 	indent int
 	// The next token. We always look one token ahead in order to facilitate both Peek() and Next().
-	next     Token
+	next Token
+	// The name of the file we're parsing. Can be unset if we're parsing a non-file reader.
 	filename string
 	// Used to track how many braces we're within.
 	braces int
@@ -151,12 +154,12 @@ func (l *lex) Next() Token {
 // named call arguments. It returns true if the token after next is an assign operator.
 func (l *lex) AssignFollows() bool {
 	l.stripSpaces()
-	return l.b[l.i] == '=' && l.b[l.i+1] != '='
+	return l.bytes[l.pos] == '=' && l.bytes[l.pos+1] != '='
 }
 
 func (l *lex) stripSpaces() {
-	for l.b[l.i] == ' ' {
-		l.i++
+	for l.bytes[l.pos] == ' ' {
+		l.pos++
 		l.col++
 	}
 }
@@ -167,7 +170,7 @@ func (l *lex) nextToken() Token {
 	pos := Position{
 		Filename: l.filename,
 		// These are all 1-indexed for niceness.
-		Offset: l.i + 1,
+		Offset: l.pos + 1,
 		Line:   l.line + 1,
 		Column: l.col + 1,
 	}
@@ -175,19 +178,19 @@ func (l *lex) nextToken() Token {
 		l.unindents--
 		return Token{Type: Unindent, Pos: pos}
 	}
-	b := l.b[l.i]
-	rawString := b == 'r' && (l.b[l.i+1] == '"' || l.b[l.i+1] == '\'')
-	fString := b == 'f' && (l.b[l.i+1] == '"' || l.b[l.i+1] == '\'')
+	next := l.bytes[l.pos]
+	rawString := next == 'r' && (l.bytes[l.pos+1] == '"' || l.bytes[l.pos+1] == '\'')
+	fString := next == 'f' && (l.bytes[l.pos+1] == '"' || l.bytes[l.pos+1] == '\'')
 	if rawString || fString {
-		l.i++
+		l.pos++
 		l.col++
-		b = l.b[l.i]
-	} else if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_' || b >= utf8.RuneSelf {
+		next = l.bytes[l.pos]
+	} else if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') || next == '_' || next >= utf8.RuneSelf {
 		return l.consumeIdent(pos)
 	}
-	l.i++
+	l.pos++
 	l.col++
-	switch b {
+	switch next {
 	case 0:
 		// End of file (we null terminate it above so this is easy to spot)
 		return Token{Type: EOF, Pos: pos}
@@ -199,12 +202,12 @@ func (l *lex) nextToken() Token {
 		l.line++
 		l.col = 0
 		indent := 0
-		for l.b[l.i] == ' ' {
-			l.i++
+		for l.bytes[l.pos] == ' ' {
+			l.pos++
 			l.col++
 			indent++
 		}
-		if l.b[l.i] == '\n' {
+		if l.bytes[l.pos] == '\n' {
 			return l.nextToken()
 		}
 		if l.braces == 0 {
@@ -228,65 +231,65 @@ func (l *lex) nextToken() Token {
 		}
 		return l.nextToken()
 	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
-		return l.consumeInteger(b, pos)
+		return l.consumeInteger(next, pos)
 	case '"', '\'':
 		// String literal, consume to end.
-		return l.consumePossiblyTripleQuotedString(b, pos, rawString, fString)
+		return l.consumePossiblyTripleQuotedString(next, pos, rawString, fString)
 	case '(', '[', '{':
 		l.braces++
-		return Token{Type: rune(b), Value: string(b), Pos: pos}
+		return Token{Type: rune(next), Value: string(next), Pos: pos}
 	case ')', ']', '}':
 		if l.braces > 0 { // Don't let it go negative, it fouls things up
 			l.braces--
 		}
-		return Token{Type: rune(b), Value: string(b), Pos: pos}
+		return Token{Type: rune(next), Value: string(next), Pos: pos}
 	case '=', '!', '+', '<', '>':
 		// Look ahead one byte to see if this is an augmented assignment or comparison.
-		if l.b[l.i] == '=' {
-			l.i++
+		if l.bytes[l.pos] == '=' {
+			l.pos++
 			l.col++
-			return Token{Type: LexOperator, Value: string([]byte{b, l.b[l.i-1]}), Pos: pos}
+			return Token{Type: LexOperator, Value: string([]byte{next, l.bytes[l.pos-1]}), Pos: pos}
 		}
 		fallthrough
-	case ',', '.', '%', '*', '|', '&', ':':
-		return Token{Type: rune(b), Value: string(b), Pos: pos}
+	case ',', '.', '%', '*', '|', '&', ':', '/':
+		return Token{Type: rune(next), Value: string(next), Pos: pos}
 	case '#':
 		// Comment character, consume to end of line.
-		for l.b[l.i] != '\n' && l.b[l.i] != 0 {
-			l.i++
+		for l.bytes[l.pos] != '\n' && l.bytes[l.pos] != 0 {
+			l.pos++
 			l.col++
 		}
 		return l.nextToken() // Comments aren't tokens themselves.
 	case '-':
 		// We lex unary - with the integer if possible.
-		if l.b[l.i] >= '0' && l.b[l.i] <= '9' {
-			return l.consumeInteger(b, pos)
+		if l.bytes[l.pos] >= '0' && l.bytes[l.pos] <= '9' {
+			return l.consumeInteger(next, pos)
 		}
-		return Token{Type: rune(b), Value: string(b), Pos: pos}
+		return Token{Type: rune(next), Value: string(next), Pos: pos}
 	case '\t':
 		fail(pos, "Tabs are not permitted in BUILD files, use space-based indentation instead")
 	default:
-		fail(pos, "Unknown symbol %c", b)
+		fail(pos, "Unknown symbol %c", next)
 	}
 	panic("unreachable")
 }
 
 // consumeInteger consumes all characters until the end of an integer literal is reached.
 func (l *lex) consumeInteger(initial byte, pos Position) Token {
-	s := make([]byte, 1, 10)
-	s[0] = initial
-	for c := l.b[l.i]; c >= '0' && c <= '9'; c = l.b[l.i] {
-		l.i++
+	value := make([]byte, 1, 10)
+	value[0] = initial
+	for next := l.bytes[l.pos]; next >= '0' && next <= '9'; next = l.bytes[l.pos] {
+		l.pos++
 		l.col++
-		s = append(s, c)
+		value = append(value, next)
 	}
-	return Token{Type: Int, Value: string(s), Pos: pos}
+	return Token{Type: Int, Value: string(value), Pos: pos}
 }
 
 // consumePossiblyTripleQuotedString consumes all characters until the end of a string token.
 func (l *lex) consumePossiblyTripleQuotedString(quote byte, pos Position, raw, fString bool) Token {
-	if l.b[l.i] == quote && l.b[l.i+1] == quote {
-		l.i += 2 // Jump over initial quote
+	if l.bytes[l.pos] == quote && l.bytes[l.pos+1] == quote {
+		l.pos += 2 // Jump over initial quote
 		l.col += 2
 		return l.consumeString(quote, pos, true, raw, fString)
 	}
@@ -295,49 +298,47 @@ func (l *lex) consumePossiblyTripleQuotedString(quote byte, pos Position, raw, f
 
 // consumeString consumes all characters until the end of a string literal is reached.
 func (l *lex) consumeString(quote byte, pos Position, multiline, raw, fString bool) Token {
-	s := make([]byte, 1, 100) // 100 chars is typically enough for a single string literal.
-	s[0] = '"'
+	value := make([]byte, 1, 100) // 100 chars is typically enough for a single string literal.
+	value[0] = '"'
 	escaped := false
 	for {
-		c := l.b[l.i]
-		l.i++
+		next := l.bytes[l.pos]
+		l.pos++
 		l.col++
 		if escaped {
-			if c == 'n' {
-				s = append(s, '\n')
-			} else if c == '\n' && multiline {
+			if next == 'n' {
+				value = append(value, '\n')
+			} else if next == '\n' && multiline {
 				l.line++
 				l.col = 0
-			} else if c == '\\' || c == '\'' || c == '"' {
-				s = append(s, c)
+			} else if next == '\\' || next == '\'' || next == '"' {
+				value = append(value, next)
 			} else {
-				s = append(s, '\\', c)
+				value = append(value, '\\', next)
 			}
 			escaped = false
 			continue
 		}
-		switch c {
+		switch next {
 		case quote:
-			s = append(s, '"')
-			if !multiline || (l.b[l.i] == quote && l.b[l.i+1] == quote) {
+			if !multiline || (l.bytes[l.pos] == quote && l.bytes[l.pos+1] == quote) {
+				value = append(value, '"')
 				if multiline {
-					l.i += 2
+					l.pos += 2
 					l.col += 2
 				}
-				token := Token{Type: String, Value: string(s), Pos: pos}
+				token := Token{Type: String, Value: string(value), Pos: pos}
 				if fString {
 					token.Value = "f" + token.Value
 				}
-				if l.braces > 0 {
-					return l.handleImplicitStringConcatenation(token)
-				}
 				return token
 			}
+			value = append(value, next)
 		case '\n':
 			if multiline {
 				l.line++
 				l.col = 0
-				s = append(s, c)
+				value = append(value, next)
 				continue
 			}
 			fallthrough
@@ -350,50 +351,21 @@ func (l *lex) consumeString(quote byte, pos Position, multiline, raw, fString bo
 			}
 			fallthrough
 		default:
-			s = append(s, c)
+			value = append(value, next)
 		}
 	}
-}
-
-// handleImplicitStringConcatenation looks ahead after a string token and checks if the next token will be a string; if so
-// we collapse them both into one string now.
-func (l *lex) handleImplicitStringConcatenation(token Token) Token {
-	col := l.col
-	line := l.line
-	for i, b := range l.b[l.i:] {
-		switch b {
-		case '\n':
-			col = 0
-			line++
-			continue
-		case ' ':
-			col++
-			continue
-		case '"', '\'':
-			l.i += i + 1
-			l.col = col + 1
-			l.line = line
-			// Note that we don't handle raw or format strings here. Anecdotally, that seems relatively rare...
-			tok := l.consumePossiblyTripleQuotedString(b, token.Pos, false, false)
-			token.Value = token.Value[:len(token.Value)-1] + tok.Value[1:]
-			return token
-		default:
-			return token
-		}
-	}
-	return token
 }
 
 // consumeIdent consumes all characters of an identifier.
 func (l *lex) consumeIdent(pos Position) Token {
 	s := make([]rune, 0, 100)
 	for {
-		c := rune(l.b[l.i])
+		c := rune(l.bytes[l.pos])
 		if c >= utf8.RuneSelf {
 			// Multi-byte encoded in utf-8.
-			r, n := utf8.DecodeRune(l.b[l.i:])
+			r, n := utf8.DecodeRune(l.bytes[l.pos:])
 			c = r
-			l.i += n
+			l.pos += n
 			l.col += n
 			if !unicode.IsLetter(c) && !unicode.IsDigit(c) {
 				fail(pos, "Illegal Unicode identifier %c", c)
@@ -401,7 +373,7 @@ func (l *lex) consumeIdent(pos Position) Token {
 			s = append(s, c)
 			continue
 		}
-		l.i++
+		l.pos++
 		l.col++
 		switch c {
 		case ' ':
@@ -411,7 +383,7 @@ func (l *lex) consumeIdent(pos Position) Token {
 			s = append(s, c)
 		default:
 			// End of identifier. Unconsume the last character so it gets handled next time.
-			l.i--
+			l.pos--
 			l.col--
 			return Token{Type: Ident, Value: string(s), Pos: pos}
 		}

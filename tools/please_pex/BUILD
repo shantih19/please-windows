@@ -1,17 +1,3 @@
-filegroup(
-    name = "pex_data",
-    srcs = [
-        "behave.py",
-        "custom.py",
-        "pex_main.py",
-        "pex_run.py",
-        "pytest.py",
-        "test_main.py",
-        "unittest.py",
-    ],
-    visibility = ["//tools/please_pex/pex:all"],
-)
-
 go_binary(
     name = "pex_main",
     srcs = ["pex_main.go"],
@@ -31,6 +17,7 @@ genrule(
         "//third_party/python:six",
         "//third_party/python:xmlrunner",
         "//third_party/python:coverage",
+        "//third_party/python:debugpy",
         "//third_party/python:pytest",
         "//third_party/python:py",
         "//third_party/python:pluggy",
@@ -61,7 +48,7 @@ genrule(
         "rm -rf third_party .bootstrap/xmlrunner/extra .bootstrap/coverage/htmlfiles .bootstrap/.*.pex.zip",
         '"$TOOL" z -d -i .bootstrap -o "$OUTS" --preamble_file $(location :pex_main)',
     ],
-    tools = ["//tools/jarcat"],
+    tools = [CONFIG.JARCAT_TOOL],
     visibility = ["PUBLIC"],
 )
 

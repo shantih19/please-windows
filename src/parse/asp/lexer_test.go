@@ -8,6 +8,7 @@ import (
 )
 
 func assertToken(t *testing.T, tok Token, tokenType rune, value string, line, column, offset int) {
+	t.Helper()
 	assert.EqualValues(t, tokenType, tok.Type, "incorrect type")
 	assert.Equal(t, value, tok.Value, "incorrect value")
 	assert.Equal(t, line, tok.Pos.Line, "incorrect line")
@@ -330,20 +331,14 @@ func TestUnevenUnindent(t *testing.T) {
 	assertToken(t, l.Next(), EOF, "", 6, 1, 52)
 }
 
-const implicitStringConcatenation = `
-str('testing that we can carry these '
-    'over multiple lines')
-`
-
-func TestImplicitStringConcatenation(t *testing.T) {
-	l := newLexer(strings.NewReader(implicitStringConcatenation))
-	assertToken(t, l.Next(), Ident, "str", 2, 1, 2)
-	assertToken(t, l.Next(), '(', "(", 2, 4, 5)
-	assertToken(t, l.Next(), String, `"testing that we can carry these over multiple lines"`, 2, 5, 6)
-}
-
-func TestImplicitStringConcatenationOnlyHappensInsideBraces(t *testing.T) {
-	l := newLexer(strings.NewReader("'hello' 'world'"))
-	assertToken(t, l.Next(), String, `"hello"`, 1, 1, 1)
-	assertToken(t, l.Next(), String, `"world"`, 1, 9, 9)
+func TestCRLF(t *testing.T) {
+	l := newLexer(strings.NewReader("package()\r\nsubinclude()\r\n"))
+	assertToken(t, l.Next(), Ident, "package", 1, 1, 1)
+	assertToken(t, l.Next(), '(', "(", 1, 8, 8)
+	assertToken(t, l.Next(), ')', ")", 1, 9, 9)
+	assertToken(t, l.Next(), EOL, "", 1, 11, 11)
+	assertToken(t, l.Next(), Ident, "subinclude", 2, 1, 12)
+	assertToken(t, l.Next(), '(', "(", 2, 11, 22)
+	assertToken(t, l.Next(), ')', ")", 2, 12, 23)
+	assertToken(t, l.Next(), EOL, "", 2, 14, 25)
 }

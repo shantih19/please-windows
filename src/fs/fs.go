@@ -2,15 +2,16 @@
 package fs
 
 import (
+	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 
-	"gopkg.in/op/go-logging.v1"
+	"github.com/thought-machine/please/src/cli/logging"
+	"github.com/thought-machine/please/src/process"
 )
 
-var log = logging.MustGetLogger("fs")
+var log = logging.Log
 
 // DirPermissions are the default permission bits we apply to directories.
 const DirPermissions = os.ModeDir | 0775
@@ -32,6 +33,15 @@ func EnsureDir(filename string) error {
 	return err
 }
 
+// OpenDirFile ensures that the directory of the given file has been created before
+// calling the underlying os.OpenFile function.
+func OpenDirFile(filename string, flag int, perm os.FileMode) (*os.File, error) {
+	if err := EnsureDir(filename); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(filename, flag, perm)
+}
+
 // PathExists returns true if the given path exists, as a file or a directory.
 func PathExists(filename string) bool {
 	_, err := os.Lstat(filename)
@@ -50,7 +60,6 @@ func IsSymlink(filename string) bool {
 	return err == nil && (info.Mode()&os.ModeSymlink) != 0
 }
 
-
 // CopyFile copies a file from 'from' to 'to', with an attempt to perform a copy & rename
 // to avoid chaos if anything goes wrong partway.
 func CopyFile(from string, to string, mode os.FileMode) error {
@@ -65,14 +74,13 @@ func CopyFile(from string, to string, mode os.FileMode) error {
 // WriteFile writes data from a reader to the file named 'to', with an attempt to perform
 // a copy & rename to avoid chaos if anything goes wrong partway.
 func WriteFile(fromFile io.Reader, to string, mode os.FileMode) error {
-	if err := os.RemoveAll(to); err != nil {
-		return err
-	}
 	dir, file := path.Split(to)
-	if err := os.MkdirAll(dir, DirPermissions); err != nil {
-		return err
+	if dir != "" {
+		if err := os.MkdirAll(dir, DirPermissions); err != nil {
+			return err
+		}
 	}
-	tempFile, err := ioutil.TempFile(dir, file)
+	tempFile, err := os.CreateTemp(dir, file)
 	if err != nil {
 		return err
 	}
@@ -90,7 +98,7 @@ func WriteFile(fromFile io.Reader, to string, mode os.FileMode) error {
 		return err
 	}
 	// And move it to its final destination.
-	return os.Rename(tempFile.Name(), to)
+	return renameFile(tempFile.Name(), to)
 }
 
 // IsDirectory checks if a given path is a directory
@@ -107,4 +115,72 @@ func IsPackage(buildFileNames []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// Try to gracefully rename the file as the os.Rename does not work across
+// filesystems and on most Linux systems /tmp is mounted as tmpfs
+func renameFile(from, to string) (err error) {
+	err = os.Rename(from, to)
+	if err == nil {
+		return nil
+	}
+	err = copyFile(from, to)
+	if err != nil {
+		return err
+	}
+	err = os.RemoveAll(from)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func copyFile(from, to string) (err error) {
+	in, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(to)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if e := out.Close(); e != nil {
+			err = e
+		}
+	}()
+
+	_, err = io.Copy(out, in)
+	if err != nil {
+		return err
+	}
+
+	si, err := os.Stat(from)
+	if err != nil {
+		return err
+	}
+	err = os.Chmod(to, si.Mode())
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ForceRemove will try and remove the path with `os.RemoveAll`, and if that fails, it will use `rm -rf` running the
+// command in any namespace that please is configured to.
+func ForceRemove(exec *process.Executor, path string) error {
+	// Try and remove it normally first
+	if err := os.RemoveAll(path); err == nil || os.IsNotExist(err) {
+		return nil
+	}
+
+	cmd := exec.ExecCommand(process.NoSandbox, false, "rm", "-rf", path)
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to remove %s: %w\nOutput: %s", path, err, string(out))
+	}
+	return nil
 }

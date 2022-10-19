@@ -12,29 +12,59 @@ import (
 	"syscall"
 	"time"
 
-	"gopkg.in/op/go-logging.v1"
-
 	"github.com/thought-machine/please/src/cli"
+	"github.com/thought-machine/please/src/cli/logging"
 )
 
-var log = logging.MustGetLogger("progress")
+var log = logging.Log
+
+type NamespacingPolicy string
+
+const (
+	NamespaceAlways  NamespacingPolicy = "always"
+	NamespaceNever   NamespacingPolicy = "never"
+	NamespaceSandbox NamespacingPolicy = "sandbox"
+)
 
 // An Executor handles starting, running and monitoring a set of subprocesses.
 // It registers as a signal handler to attempt to terminate them all at process exit.
 type Executor struct {
-	sandboxCommand string
-	processes      map[*exec.Cmd]struct{}
-	mutex          sync.Mutex
+	// Whether we should set up linux namespaces at all
+	namespace NamespacingPolicy
+	// The tool that will do the network/mount sandboxing
+	sandboxTool      string
+	usePleaseSandbox bool
+	processes        map[*exec.Cmd]<-chan error
+	mutex            sync.Mutex
 }
 
-// New returns a new Executor.
-func New(sandboxCommand string) *Executor {
+func NewSandboxingExecutor(usePleaseSandbox bool, namespace NamespacingPolicy, sandboxTool string) *Executor {
 	o := &Executor{
-		sandboxCommand: sandboxCommand,
-		processes:      map[*exec.Cmd]struct{}{},
+		namespace:        namespace,
+		usePleaseSandbox: usePleaseSandbox,
+		sandboxTool:      sandboxTool,
+		processes:        map[*exec.Cmd]<-chan error{},
 	}
 	cli.AtExit(o.killAll) // Kill any subprocess if we are ourselves killed
 	return o
+}
+
+// New returns a new Executor.
+func New() *Executor {
+	return NewSandboxingExecutor(false, NamespaceNever, "")
+}
+
+// SandboxConfig contains what namespaces should be sandboxed
+type SandboxConfig struct {
+	Network, Mount, Fakeroot bool
+}
+
+// NoSandbox represents a no-sandbox value
+var NoSandbox = SandboxConfig{}
+
+// NewSandboxConfig creates a new SandboxConfig
+func NewSandboxConfig(network, mount bool) SandboxConfig {
+	return SandboxConfig{Network: network, Mount: mount}
 }
 
 // A Target is a minimal interface of what we need from a BuildTarget.
@@ -56,15 +86,14 @@ type Target interface {
 // If the command times out the returned error will be a context.DeadlineExceeded error.
 // If showOutput is true then output will be printed to stderr as well as returned.
 // It returns the stdout only, combined stdout and stderr and any error that occurred.
-func (e *Executor) ExecWithTimeout(target Target, dir string, env []string, timeout time.Duration, showOutput, attachStdin, attachStdout bool, argv []string) ([]byte, []byte, error) {
+func (e *Executor) ExecWithTimeout(ctx context.Context, target Target, dir string, env []string, timeout time.Duration, showOutput, attachStdin, attachStdout, foreground bool, sandbox SandboxConfig, argv []string) ([]byte, []byte, error) {
 	// We deliberately don't attach this context to the command, so we have better
 	// control over how the process gets terminated.
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := e.ExecCommand(argv[0], argv[1:]...)
-	defer e.removeProcess(cmd)
+	cmd := e.ExecCommand(sandbox, foreground, argv[0], argv[1:]...)
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = append(cmd.Env, env...)
 
 	var out bytes.Buffer
 	var outerr safeBuffer
@@ -99,46 +128,46 @@ func (e *Executor) ExecWithTimeout(target Target, dir string, env []string, time
 		return nil, nil, err
 	}
 	ch := make(chan error)
+	e.registerProcess(cmd, ch)
+	defer e.removeProcess(cmd)
 	go runCommand(cmd, ch)
 	select {
 	case err = <-ch:
 		// Do nothing.
-	case <-time.After(timeout):
+	case <-ctx.Done():
+		err = ctx.Err()
 		e.KillProcess(cmd)
-		err = fmt.Errorf("Timeout exceeded: %s", outerr.String())
 	}
 	return out.Bytes(), outerr.Bytes(), err
 }
 
 // runCommand runs a command and signals on the given channel when it's done.
-func runCommand(cmd *exec.Cmd, ch chan error) {
+func runCommand(cmd *exec.Cmd, ch chan<- error) {
 	ch <- cmd.Wait()
 }
 
 // ExecWithTimeoutShell runs an external command within a Bash shell.
 // Other arguments are as ExecWithTimeout.
 // Note that the command is deliberately a single string.
-func (e *Executor) ExecWithTimeoutShell(target Target, dir string, env []string, timeout time.Duration, showOutput bool, cmd string, sandbox bool) ([]byte, []byte, error) {
-	return e.ExecWithTimeoutShellStdStreams(target, dir, env, timeout, showOutput, cmd, sandbox, false)
+func (e *Executor) ExecWithTimeoutShell(target Target, dir string, env []string, timeout time.Duration, showOutput, foreground bool, sandbox SandboxConfig, cmd string) ([]byte, []byte, error) {
+	return e.ExecWithTimeoutShellStdStreams(target, dir, env, timeout, showOutput, foreground, sandbox, cmd, false)
 }
 
 // ExecWithTimeoutShellStdStreams is as ExecWithTimeoutShell but optionally attaches stdin to the subprocess.
-func (e *Executor) ExecWithTimeoutShellStdStreams(target Target, dir string, env []string, timeout time.Duration, showOutput bool, cmd string, sandbox, attachStdStreams bool) ([]byte, []byte, error) {
+func (e *Executor) ExecWithTimeoutShellStdStreams(target Target, dir string, env []string, timeout time.Duration, showOutput, foreground bool, sandbox SandboxConfig, cmd string, attachStdStreams bool) ([]byte, []byte, error) {
 	c := BashCommand("bash", cmd, target.ShouldExitOnError())
-	if sandbox {
-		if e.sandboxCommand == "" {
-			log.Fatalf("Sandbox tool not found on PATH")
-		}
-		c = append([]string{e.sandboxCommand}, c...)
-	}
-	return e.ExecWithTimeout(target, dir, env, timeout, showOutput, attachStdStreams, attachStdStreams, c)
+	return e.ExecWithTimeout(context.Background(), target, dir, env, timeout, showOutput, attachStdStreams, attachStdStreams, foreground, sandbox, c)
 }
 
 // KillProcess kills a process, attempting to send it a SIGTERM first followed by a SIGKILL
 // shortly after if it hasn't exited.
 func (e *Executor) KillProcess(cmd *exec.Cmd) {
-	success := killProcess(cmd, syscall.SIGTERM, 30*time.Millisecond)
-	if !killProcess(cmd, syscall.SIGKILL, time.Second) && !success {
+	e.killProcess(cmd, e.processChan(cmd))
+}
+
+func (e *Executor) killProcess(cmd *exec.Cmd, ch <-chan error) {
+	success := sendSignal(cmd, ch, syscall.SIGTERM, 30*time.Millisecond)
+	if !sendSignal(cmd, ch, syscall.SIGKILL, time.Second) && !success {
 		log.Error("Failed to kill inferior process")
 	}
 	e.removeProcess(cmd)
@@ -150,9 +179,23 @@ func (e *Executor) removeProcess(cmd *exec.Cmd) {
 	delete(e.processes, cmd)
 }
 
-// killProcess implements the two-step killing of processes with a SIGTERM and a SIGKILL if
-// that's unsuccessful. It returns true if the process exited within the timeout.
-func killProcess(cmd *exec.Cmd, sig syscall.Signal, timeout time.Duration) bool {
+// registerProcess stores the given process in this executor's map.
+func (e *Executor) registerProcess(cmd *exec.Cmd, ch <-chan error) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	e.processes[cmd] = ch
+}
+
+// processChan returns the error channel for a process.
+func (e *Executor) processChan(cmd *exec.Cmd) <-chan error {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	return e.processes[cmd]
+}
+
+// sendSignal sends a single signal to the process in an attempt to stop it.
+// It returns true if the process exited within the timeout.
+func sendSignal(cmd *exec.Cmd, ch <-chan error, sig syscall.Signal, timeout time.Duration) bool {
 	if cmd.Process == nil {
 		log.Debug("Not terminating process, it seems to have not started yet")
 		return false
@@ -161,8 +204,6 @@ func killProcess(cmd *exec.Cmd, sig syscall.Signal, timeout time.Duration) bool 
 	// long (we do not want to get hung up if it ignores our SIGTERM).
 	log.Debug("Sending signal %s to -%d", sig, cmd.Process.Pid)
 	Kill(-cmd.Process.Pid, sig) // Kill the group - we always set one in ExecCommand.
-	ch := make(chan error, 1)
-	go runCommand(cmd, ch)
 	select {
 	case <-ch:
 		return true
@@ -230,30 +271,22 @@ func progressMessage(progress *float32) string {
 // killAll kills all subprocesses of this executor.
 func (e *Executor) killAll() {
 	e.mutex.Lock()
-	processes := make([]*exec.Cmd, 0, len(e.processes))
-	for proc := range e.processes {
-		processes = append(processes, proc)
-	}
-	e.mutex.Unlock()
-
-	if len(processes) > 0 {
-		var wg sync.WaitGroup
-		wg.Add(len(processes))
-		for _, proc := range processes {
-			go func(proc *exec.Cmd) {
-				e.KillProcess(proc)
-				wg.Done()
-			}(proc)
-		}
-		wg.Wait()
+	var wg sync.WaitGroup
+	wg.Add(len(e.processes))
+	defer wg.Wait()
+	defer e.mutex.Unlock()
+	for proc, ch := range e.processes {
+		go func(proc *exec.Cmd, ch <-chan error) {
+			e.killProcess(proc, ch)
+			wg.Done()
+		}(proc, ch)
 	}
 }
 
 // ExecCommand is a utility function that runs the given command with few options.
 func ExecCommand(args ...string) ([]byte, error) {
-	e := New("")
-	cmd := e.ExecCommand(args[0], args[1:]...)
-	defer e.removeProcess(cmd)
+	e := New()
+	cmd := e.ExecCommand(NoSandbox, false, args[0], args[1:]...)
 	return cmd.CombinedOutput()
 }
 
