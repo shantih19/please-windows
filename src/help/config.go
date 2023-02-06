@@ -93,6 +93,8 @@ func allConfigHelp(config *core.Configuration) helpSection {
 				if reflect.ValueOf(config.FeatureFlags).FieldByName(excludeFlag).Bool() {
 					continue
 				}
+			} else if exclude := tf.Tag.Get("exclude"); exclude != "" {
+				continue
 			}
 			help += "\n"
 			if len(subfields) > 0 {
