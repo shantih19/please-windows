@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/manifoldco/promptui"
@@ -35,10 +36,20 @@ func registerBuiltins(s *scope) {
 	setNativeCode(s, "load", bazelLoad, varargs)
 	setNativeCode(s, "package", pkg, false, kwargs)
 	setNativeCode(s, "sorted", sorted)
+	setNativeCode(s, "reversed", reversed)
+	setNativeCode(s, "filter", filter)
+	setNativeCode(s, "map", mapFunc)
+	setNativeCode(s, "reduce", reduce)
 	setNativeCode(s, "isinstance", isinstance)
 	setNativeCode(s, "range", pyRange)
 	setNativeCode(s, "enumerate", enumerate)
 	setNativeCode(s, "zip", zip, varargs)
+	setNativeCode(s, "any", anyFunc)
+	setNativeCode(s, "all", allFunc)
+	setNativeCode(s, "min", min)
+	setNativeCode(s, "max", max)
+	setNativeCode(s, "chr", chr)
+	setNativeCode(s, "ord", ord)
 	setNativeCode(s, "len", lenFunc)
 	setNativeCode(s, "glob", glob)
 	setNativeCode(s, "bool", boolType)
@@ -55,6 +66,7 @@ func registerBuiltins(s *scope) {
 	setNativeCode(s, "add_data", addData)
 	setNativeCode(s, "add_out", addOut)
 	setNativeCode(s, "get_outs", getOuts)
+	setNativeCode(s, "get_named_outs", getNamedOuts)
 	setNativeCode(s, "add_licence", addLicence)
 	setNativeCode(s, "get_licences", getLicences)
 	setNativeCode(s, "get_command", getCommand)
@@ -166,7 +178,7 @@ func setLogCode(s *scope, name string, f func(format string, args ...interface{}
 // This is the main interface point; every build rule ultimately calls this to add
 // new objects to the build graph.
 func buildRule(s *scope, args []pyObject) pyObject {
-	s.NAssert(s.pkg == nil, "Cannot create new build rules in this context")
+	s.NAssert(s.pkg == nil, "Cannot create new build rules in this scope")
 	// We need to set various defaults from config here; it is useful to put it on the rule but not often so
 	// because most rules pass them through anyway.
 	// TODO(peterebden): when we get rid of the old parser, put these defaults on all the build rules and
@@ -189,6 +201,13 @@ func buildRule(s *scope, args []pyObject) pyObject {
 	if s.Callback {
 		target.AddedPostBuild = true
 	}
+
+	if s.parsingFor != nil && s.parsingFor.label == target.Label {
+		if err := s.state.ActivateTarget(s.pkg, s.parsingFor.label, s.parsingFor.dependent, s.mode); err != nil {
+			s.Error("%v", err)
+		}
+	}
+
 	return pyString(":" + target.Label.Name)
 }
 
@@ -261,8 +280,8 @@ func bazelLoad(s *scope, args []pyObject) pyObject {
 	s.Assert(s.state.Config.Bazel.Compatibility, "load() is only available in Bazel compatibility mode. See `plz help bazel` for more information.")
 	// The argument always looks like a build label, but it is not really one (i.e. there is no BUILD file that defines it).
 	// We do not support their legacy syntax here (i.e. "/tools/build_rules/build_test" etc).
-	l := core.ParseBuildLabelContext(string(args[0].(pyString)), s.contextPackage())
-	filename := path.Join(l.PackageName, l.Name)
+	l := s.parseLabelInContextPkg(string(args[0].(pyString)))
+	filename := filepath.Join(l.PackageName, l.Name)
 	if l.Subrepo != "" {
 		subrepo := s.state.Graph.Subrepo(l.Subrepo)
 		if subrepo == nil || (subrepo.Target != nil && subrepo != s.contextPackage().Subrepo) {
@@ -271,16 +290,18 @@ func bazelLoad(s *scope, args []pyObject) pyObject {
 		}
 		filename = subrepo.Dir(filename)
 	}
-	s.SetAll(s.interpreter.Subinclude(filename, l), false)
+	s.SetAll(s.interpreter.Subinclude(s, filename, l, false), false)
 	return None
 }
 
-// WaitForSubincludedTarget drops the interpreter lock and waits for the subincluded target to be built
+// WaitForSubincludedTarget drops the interpreter lock and waits for the subincluded target to be built. This is
+// important to keep us from deadlocking all available parser threads (easy to happen if they're all waiting on a
+// single target which now can't start)
 func (s *scope) WaitForSubincludedTarget(l, dependent core.BuildLabel) *core.BuildTarget {
 	s.interpreter.limiter.Release()
 	defer s.interpreter.limiter.Acquire()
 
-	return s.state.WaitForTargetAndEnsureDownload(l, dependent)
+	return s.state.WaitForTargetAndEnsureDownload(l, dependent, s.mode.IsPreload())
 }
 
 // builtinFail raises an immediate error that can't be intercepted.
@@ -291,20 +312,21 @@ func builtinFail(s *scope, args []pyObject) pyObject {
 
 func subinclude(s *scope, args []pyObject) pyObject {
 	if s.contextPackage() == nil {
-		s.Error("cannot subinclude from this context")
+		s.Error("cannot subinclude from this scope")
 	}
 	for _, arg := range args {
-		t := subincludeTarget(s, s.parseLabelContext(string(arg.(pyString))))
+		t := subincludeTarget(s, s.parseLabelInContextPkg(string(arg.(pyString))))
 		s.Assert(s.contextPackage().Label().CanSee(s.state, t), "Target %s isn't visible to be subincluded into %s", t.Label, s.contextPackage().Label())
 
 		incPkgState := s.state
 		if t.Label.Subrepo != "" {
-			incPkgState = s.state.Graph.SubrepoOrDie(t.Label.Subrepo).State
+			subrepo := s.state.Graph.SubrepoOrDie(t.Label.Subrepo)
+			incPkgState = subrepo.State
 		}
-		s.interpreter.loadPluginConfig(incPkgState, s.state, s.config)
+		s.interpreter.loadPluginConfig(s, incPkgState)
 
 		for _, out := range t.Outputs() {
-			s.SetAll(s.interpreter.Subinclude(path.Join(t.OutDir(), out), t.Label), false)
+			s.SetAll(s.interpreter.Subinclude(s, filepath.Join(t.OutDir(), out), t.Label, false), false)
 		}
 	}
 	return None
@@ -313,13 +335,11 @@ func subinclude(s *scope, args []pyObject) pyObject {
 // subincludeTarget returns the target for a subinclude() call to a label.
 // It blocks until the target exists and is built.
 func subincludeTarget(s *scope, l core.BuildLabel) *core.BuildTarget {
+	s.NAssert(l.IsPseudoTarget(), "Can't pass :all or /... to subinclude()")
+
 	pkg := s.contextPackage()
 	pkgLabel := pkg.Label()
-	if l.Subrepo == pkgLabel.Subrepo && l.PackageName == pkgLabel.PackageName && s.subincludeLabel == nil {
-		// This is a subinclude in the same package, check the target exists.
-		s.NAssert(pkg.Target(l.Name) == nil, "Target :%s is not defined in this package; it has to be defined before the subinclude() call", l.Name)
-	}
-	s.NAssert(l.IsPseudoTarget(), "Can't pass :all or /... to subinclude()")
+
 	// If we're including from a subrepo, or if we're in a subrepo and including from a different subrepo, make sure
 	// that package is parsed to avoid locking. Locks can occur when the target's package also subincludes that target.
 	//
@@ -334,10 +354,27 @@ func subincludeTarget(s *scope, l core.BuildLabel) *core.BuildTarget {
 			Subrepo:     subrepoLabel.Subrepo,
 			Name:        "all",
 		}
-		s.state.WaitForPackage(subrepoPackageLabel, pkgLabel)
+		s.state.WaitForPackage(subrepoPackageLabel, pkgLabel, s.mode|core.ParseModeForSubinclude)
 	}
-	// Temporarily release the parallelism limiter; this is important to keep us from deadlocking
-	// all available parser threads (easy to happen if they're all waiting on a single target which now can't start)
+
+	// isLocal is true when this subinclude target in the current package being parsed
+	isLocal := l.Subrepo == pkgLabel.Subrepo && l.PackageName == pkgLabel.PackageName
+
+	// If the subinclude is local to this package, it must already exist in the graph. If it already exists in the graph
+	// but isn't activated, we should activate it otherwise WaitForSubincludedTarget might block. This can happen when
+	// another package also subincludes this target, and queues it first.
+	if isLocal && s.pkg != nil {
+		t := s.state.Graph.Target(l)
+		if t == nil {
+			s.Error("Target :%s is not defined in this package; it has to be defined before the subinclude() call", l.Name)
+		}
+		if t.State() < core.Active {
+			if err := s.state.ActivateTarget(s.pkg, l, pkgLabel, s.mode|core.ParseModeForSubinclude); err != nil {
+				s.Error("Failed to activate subinclude target: %v", err)
+			}
+		}
+	}
+
 	t := s.WaitForSubincludedTarget(l, pkgLabel)
 
 	// TODO(jpoole): when pkg is nil, that means this subinclude was made by another subinclude. We're currently loosing
@@ -363,27 +400,51 @@ func objLen(obj pyObject) pyInt {
 	case pyFrozenDict:
 		return pyInt(len(t.pyDict))
 	case pyString:
-		return pyInt(len(t))
+		return pyInt(len([]rune(t)))
 	}
 	panic("object of type " + obj.Type() + " has no len()")
 }
 
+func chr(s *scope, args []pyObject) pyObject {
+	i, isInt := args[0].(pyInt)
+	s.Assert(isInt, "Argument i must be an integer, not %s", args[0].Type())
+	s.Assert(i >= 0 && i <= unicode.MaxRune, "Argument i must be within the Unicode code point range")
+	return pyString(rune(i))
+}
+
+func ord(s *scope, args []pyObject) pyObject {
+	c, isStr := args[0].(pyString)
+	s.Assert(isStr, "Argument c must be a string, not %s", args[0].Type())
+	s.Assert(objLen(c) == 1, "Argument c must be a string containing a single Unicode character")
+	return pyInt([]rune(c)[0])
+}
+
 func isinstance(s *scope, args []pyObject) pyObject {
 	obj := args[0]
-	types := args[1]
-	if f, ok := types.(*pyFunc); ok && isType(obj, f.name) {
+	typesArg := args[1]
+
+	var types pyList
+
+	if l, ok := typesArg.(pyList); ok {
+		types = l
+	} else {
+		types = pyList{typesArg}
+	}
+
+	for _, li := range types {
 		// Special case for 'str' and so forth that are functions but also types.
-		return True
-	} else if l, ok := types.(pyList); ok {
-		for _, li := range l {
-			if lif, ok := li.(*pyFunc); ok && isType(obj, lif.name) {
-				return True
-			} else if reflect.TypeOf(obj) == reflect.TypeOf(li) {
-				return True
-			}
+		if lif, ok := li.(*pyFunc); ok && isType(obj, lif.name) {
+			return True
+		} else if _, ok := obj.(*pyFunc); ok {
+			continue // reflect would always return true
+		} else if reflect.TypeOf(obj) == reflect.TypeOf(li) {
+			return True
 		}
 	}
-	return newPyBool(reflect.TypeOf(obj) == reflect.TypeOf(types))
+	if _, ok := obj.(*pyFunc); ok {
+		return False // reflect would always return true
+	}
+	return newPyBool(reflect.TypeOf(obj) == reflect.TypeOf(typesArg))
 }
 
 func isType(obj pyObject, name string) bool {
@@ -400,6 +461,8 @@ func isType(obj pyObject, name string) bool {
 		return name == "dict"
 	case *pyConfig:
 		return name == "config"
+	case *pyFunc:
+		return name == "callable"
 	}
 	return false
 }
@@ -541,11 +604,20 @@ func glob(s *scope, args []pyObject) pyObject {
 	exclude := pyStrOrListAsList(s, args[1], "exclude")
 	hidden := args[2].IsTruthy()
 	includeSymlinks := args[3].IsTruthy()
+	allowEmpty := args[4].IsTruthy()
 	exclude = append(exclude, s.state.Config.Parse.BuildFileName...)
 	if s.globber == nil {
 		s.globber = fs.NewGlobber(s.state.Config.Parse.BuildFileName)
 	}
-	return fromStringList(s.globber.Glob(s.pkg.SourceRoot(), include, exclude, hidden, includeSymlinks))
+
+	glob := s.globber.Glob(s.pkg.SourceRoot(), include, exclude, hidden, includeSymlinks)
+	if !allowEmpty && len(glob) == 0 {
+		// Strip build file name from exclude list for error message
+		exclude = exclude[:len(exclude)-len(s.state.Config.Parse.BuildFileName)]
+		log.Fatalf("glob(include=%s, exclude=%s) in %s returned no files. If this is intended, set allow_empty=True on the glob.", include, exclude, s.pkg.Filename)
+	}
+
+	return fromStringList(glob)
 }
 
 func pyStrOrListAsList(s *scope, arg pyObject, name string) []string {
@@ -637,12 +709,92 @@ func sorted(s *scope, args []pyObject) pyObject {
 	return l
 }
 
+func reversed(s *scope, args []pyObject) pyObject {
+	l, ok := args[0].(pyList)
+	s.Assert(ok, "irreversible type %s", args[0].Type())
+	l = l[:]
+	// TODO(chrisnovakovic): replace with slices.Reverse after upgrading to Go 1.21
+	for i, j := 0, len(l)-1; i < j; i, j = i+1, j-1 {
+		l[i], l[j] = l[j], l[i]
+	}
+	return l
+}
+
+func filter(s *scope, args []pyObject) pyObject {
+	f, isFunc := args[0].(*pyFunc)
+	l, isList := args[1].(pyList)
+	s.Assert(isFunc, "Argument filter must be callable, not %s", args[0].Type())
+	s.Assert(isList, "Argument seq must be a list, not %s", args[1].Type())
+
+	var ret pyList
+	for _, li := range l {
+		c := &Call{
+			Arguments: []CallArgument{{
+				Value: Expression{Optimised: &OptimisedExpression{Constant: li}},
+			}},
+		}
+		if f.Call(s, c).IsTruthy() {
+			ret = append(ret, li)
+		}
+	}
+	return ret
+}
+
+func mapFunc(s *scope, args []pyObject) pyObject {
+	mapper, isFunc := args[0].(*pyFunc)
+	l, isList := args[1].(pyList)
+	s.Assert(isFunc, "Argument mapper must be callable, not %s", args[0].Type())
+	s.Assert(isList, "Argument seq must be a list, not %s", args[1].Type())
+
+	var ret pyList
+	for _, li := range l {
+		c := &Call{
+			Arguments: []CallArgument{{
+				Value: Expression{Optimised: &OptimisedExpression{Constant: li}},
+			}},
+		}
+		ret = append(ret, mapper.Call(s, c))
+	}
+	return ret
+}
+
+func reduce(s *scope, args []pyObject) pyObject {
+	function, isFunc := args[0].(*pyFunc)
+	l, isList := args[1].(pyList)
+	init := args[2]
+	s.Assert(isFunc, "Argument function must be callable, not %s", args[0].Type())
+	s.Assert(isList, "Argument seq must be a list, not %s", args[1].Type())
+
+	ret := init
+	start := 0
+	if init == None {
+		start = 1
+		if len(l) > 0 {
+			ret = l[0]
+		}
+		if len(l) <= 1 {
+			return ret
+		}
+	}
+	for _, li := range l[start:] {
+		c := &Call{
+			Arguments: []CallArgument{{
+				Value: Expression{Optimised: &OptimisedExpression{Constant: li}},
+			}, {
+				Value: Expression{Optimised: &OptimisedExpression{Constant: ret}},
+			}},
+		}
+		ret = function.Call(s, c)
+	}
+	return ret
+}
+
 func joinPath(s *scope, args []pyObject) pyObject {
 	l := make([]string, len(args))
 	for i, arg := range args {
 		l[i] = string(arg.(pyString))
 	}
-	return pyString(path.Join(l...))
+	return pyString(filepath.Join(l...))
 }
 
 func looksLikeBuildLabel(s *scope, args []pyObject) pyObject {
@@ -655,7 +807,7 @@ func scopeOrSubincludePackage(s *scope, subinclude bool) (*core.Package, error) 
 	if subinclude {
 		pkg := s.subincludePackage()
 		if pkg == nil {
-			return nil, errors.New("not in a subinclude context")
+			return nil, errors.New("not in a subinclude scope")
 		}
 		return pkg, nil
 	}
@@ -670,11 +822,11 @@ func packageName(s *scope, args []pyObject) pyObject {
 
 	pkg, err := scopeOrSubincludePackage(s, args[contextArgIdx].IsTruthy())
 	if err != nil {
-		s.Error("cannot call package_name() from this context: %v", err)
+		s.Error("cannot call package_name() from this scope: %v", err)
 	}
 
 	if args[labelArgIdx].IsTruthy() {
-		return pyString(core.ParseAnnotatedBuildLabelContext(string(args[labelArgIdx].(pyString)), pkg).PackageName)
+		return pyString(s.parseLabelInPackage(string(args[labelArgIdx].(pyString)), pkg).PackageName)
 	}
 
 	return pyString(pkg.Name)
@@ -688,13 +840,13 @@ func subrepoName(s *scope, args []pyObject) pyObject {
 
 	pkg, err := scopeOrSubincludePackage(s, args[contextArgIdx].IsTruthy())
 	if err != nil {
-		s.Error("cannot call subrepo_name() from this context: %v", err)
+		s.Error("cannot call subrepo_name() from this scope: %v", err)
 	}
 
 	if args[labelArgIdx].IsTruthy() {
-		l := core.ParseAnnotatedBuildLabelContext(string(args[labelArgIdx].(pyString)), pkg)
-		if l.Subrepo != "" {
-			return pyString(l.Subrepo)
+		l := s.parseAnnotatedLabelInPackage(string(args[labelArgIdx].(pyString)), pkg)
+		if label, _ := l.Label(); label.Subrepo != "" {
+			return pyString(label.Subrepo)
 		}
 	}
 
@@ -708,9 +860,9 @@ func canonicalise(s *scope, args []pyObject) pyObject {
 	)
 	pkg, err := scopeOrSubincludePackage(s, args[contextArgIdx].IsTruthy())
 	if err != nil {
-		s.Error("Cannot call canonicalise() from this context: %v", err)
+		s.Error("Cannot call canonicalise() from this scope: %v", err)
 	}
-	label := core.ParseAnnotatedBuildLabelContext(string(args[labelArgIdx].(pyString)), pkg)
+	label := s.parseLabelInPackage(string(args[labelArgIdx].(pyString)), pkg)
 	return pyString(label.String())
 }
 
@@ -736,6 +888,63 @@ func enumerate(s *scope, args []pyObject) pyObject {
 	ret := make(pyList, len(l))
 	for i, li := range l {
 		ret[i] = pyList{pyInt(i), li}
+	}
+	return ret
+}
+
+func anyFunc(s *scope, args []pyObject) pyObject {
+	l, ok := args[0].(pyList)
+	s.Assert(ok, "Argument to any must be a list, not %s", args[0].Type())
+	for _, li := range l {
+		if li.IsTruthy() {
+			return True
+		}
+	}
+	return False
+}
+
+func allFunc(s *scope, args []pyObject) pyObject {
+	l, ok := args[0].(pyList)
+	s.Assert(ok, "Argument to all must be a list, not %s", args[0].Type())
+	for _, li := range l {
+		if !li.IsTruthy() {
+			return False
+		}
+	}
+	return True
+}
+
+func min(s *scope, args []pyObject) pyObject {
+	return extreme(s, args, LessThan)
+}
+
+func max(s *scope, args []pyObject) pyObject {
+	return extreme(s, args, GreaterThan)
+}
+
+func extreme(s *scope, args []pyObject, cmp Operator) pyObject {
+	l, isList := args[0].(pyList)
+	key, isFunc := args[1].(*pyFunc)
+	s.Assert(isList, "Argument seq must be a list, not %s", args[0].Type())
+	s.Assert(len(l) > 0, "Argument seq must contain at least one item")
+	if key != nil {
+		s.Assert(isFunc, "Argument key must be callable, not %s", args[1].Type())
+	}
+	var cret, ret pyObject
+	for i, li := range l {
+		cli := li
+		if key != nil {
+			c := &Call{
+				Arguments: []CallArgument{{
+					Value: Expression{Optimised: &OptimisedExpression{Constant: li}},
+				}},
+			}
+			cli = key.Call(s, c)
+		}
+		if i == 0 || cli.Operator(cmp, cret).IsTruthy() {
+			cret = cli
+			ret = li
+		}
 	}
 	return ret
 }
@@ -849,12 +1058,12 @@ func getTargetPost(s *scope, name string) *core.BuildTarget {
 func addDep(s *scope, args []pyObject) pyObject {
 	s.Assert(s.Callback, "can only be called from a pre- or post-build callback")
 	target := getTargetPost(s, string(args[0].(pyString)))
-	dep := core.ParseBuildLabelContext(string(args[1].(pyString)), s.pkg)
+	dep := s.parseLabelInPackage(string(args[1].(pyString)), s.pkg)
 	exported := args[2].IsTruthy()
 	target.AddMaybeExportedDependency(dep, exported, false, false)
 	// Queue this dependency if it'll be needed.
 	if target.State() > core.Inactive {
-		err := s.state.QueueTarget(dep, target.Label, false)
+		err := s.state.QueueTarget(dep, target.Label, false, core.ParseModeNormal)
 		s.Assert(err == nil, "%s", err)
 	}
 	return None
@@ -864,7 +1073,7 @@ func addDatumToTargetAndMaybeQueue(s *scope, target *core.BuildTarget, datum cor
 	target.AddDatum(datum)
 	// Queue this dependency if it'll be needed.
 	if l, ok := datum.Label(); ok && target.State() > core.Inactive {
-		err := s.state.QueueTarget(l, target.Label, false)
+		err := s.state.QueueTarget(l, target.Label, false, core.ParseModeNormal)
 		s.Assert(err == nil, "%s", err)
 	}
 }
@@ -873,7 +1082,7 @@ func addNamedDatumToTargetAndMaybeQueue(s *scope, name string, target *core.Buil
 	target.AddNamedDatum(name, datum)
 	// Queue this dependency if it'll be needed.
 	if l, ok := datum.Label(); ok && target.State() > core.Inactive {
-		err := s.state.QueueTarget(l, target.Label, false)
+		err := s.state.QueueTarget(l, target.Label, false, core.ParseModeNormal)
 		s.Assert(err == nil, "%s", err)
 	}
 }
@@ -950,6 +1159,34 @@ func getOuts(s *scope, args []pyObject) pyObject {
 	return ret
 }
 
+// getNamedOuts gets the named outputs of a target
+func getNamedOuts(s *scope, args []pyObject) pyObject {
+	var target *core.BuildTarget
+	if name := args[0].String(); core.LooksLikeABuildLabel(name) {
+		label := core.ParseBuildLabel(name, s.pkg.Name)
+		target = s.state.Graph.TargetOrDie(label)
+	} else {
+		target = getTargetPost(s, name)
+	}
+
+	var outs map[string][]string
+	if target.IsFilegroup {
+		outs = target.DeclaredNamedSources()
+	} else {
+		outs = target.DeclaredNamedOutputs()
+	}
+
+	ret := make(pyDict, len(outs))
+	for k, v := range outs {
+		list := make(pyList, len(v))
+		for i, out := range v {
+			list[i] = pyString(out)
+		}
+		ret[k] = list
+	}
+	return ret
+}
+
 // addLicence adds a licence to a target.
 func addLicence(s *scope, args []pyObject) pyObject {
 	target := getTargetPost(s, string(args[0].(pyString)))
@@ -1013,7 +1250,7 @@ func selectFunc(s *scope, args []pyObject) pyObject {
 		k := keys[i]
 		if k == "//conditions:default" || k == "default" {
 			def = d[k]
-		} else if selectTarget(s, s.parseLabelContext(k)).HasLabel("config:on") {
+		} else if selectTarget(s, s.parseLabelInContextPkg(k)).HasLabel("config:on") {
 			return d[k]
 		}
 	}
@@ -1042,9 +1279,10 @@ func subrepo(s *scope, args []pyObject) pyObject {
 		BazelCompatArgIdx
 		ArchArgIdx
 		PluginArgIdx
+		PackageRootIdx
 	)
 
-	s.NAssert(s.pkg == nil, "Cannot create new subrepos in this context")
+	s.NAssert(s.pkg == nil, "Cannot create new subrepos in this scope")
 	name := string(args[NameArgIdx].(pyString))
 	dep := string(args[DepArgIdx].(pyString))
 
@@ -1053,19 +1291,19 @@ func subrepo(s *scope, args []pyObject) pyObject {
 	var target *core.BuildTarget
 	if dep != "" {
 		// N.B. The target must be already registered on this package.
-		target = s.pkg.TargetOrDie(core.ParseBuildLabelContext(dep, s.pkg).Name)
+		target = s.pkg.TargetOrDie(s.parseLabelInPackage(dep, s.pkg).Name)
 		if len(target.Outputs()) == 1 {
-			root = path.Join(target.OutDir(), target.Outputs()[0])
+			root = filepath.Join(target.OutDir(), target.Outputs()[0])
 		} else {
 			// TODO(jpoole): perhaps this should be a fatal error?
-			root = path.Join(target.OutDir(), name)
+			root = filepath.Join(target.OutDir(), name)
 		}
 	} else if args[PathArgIdx] != None {
 		root = string(args[PathArgIdx].(pyString))
 	}
 
 	// Base name
-	subrepoName := path.Join(s.pkg.Name, name)
+	subrepoName := filepath.Join(s.pkg.Name, name)
 	if args[PluginArgIdx].IsTruthy() {
 		subrepoName = name
 	}
@@ -1086,22 +1324,18 @@ func subrepo(s *scope, args []pyObject) pyObject {
 		}
 		state = state.ForArch(arch)
 		isCrossCompile = true
+	} else if state.Arch != arch {
+		state = state.ForArch(arch)
 	}
-
-	// Subrepo
-	sr := &core.Subrepo{
-		Name:           s.pkg.SubrepoArchName(subrepoName),
-		Root:           root,
-		Target:         target,
-		State:          state,
-		Arch:           arch,
-		IsCrossCompile: isCrossCompile,
+	sr := core.NewSubrepo(state, s.pkg.SubrepoArchName(subrepoName), root, target, arch, isCrossCompile)
+	if args[PackageRootIdx].IsTruthy() {
+		sr.PackageRoot = args[PackageRootIdx].String()
 	}
 
 	// Typically this would be deferred until we have built the subrepo target and have its config available. As we
 	// don't have a subrepo target, we can and should load it here.
 	if target == nil {
-		if err := sr.LoadSubrepoConfig(); err != nil {
+		if err := sr.State.Initialise(sr); err != nil {
 			log.Fatalf("Could not load subrepo config for %s: %v", sr.Name, err)
 		}
 	}

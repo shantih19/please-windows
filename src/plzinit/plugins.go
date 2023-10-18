@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -31,18 +30,18 @@ func info(format string, args ...interface{}) {
 
 // InitPlugins initialises one or more plugins by inserting plugin config values into
 // the host repo config file, and creating a build target in //plugins.
-func InitPlugins(plugins []string) {
+func InitPlugins(plugins []string, version string) error {
 	log.Debug("Initialising plugin(s): %v", plugins)
 
 	// Check that we're in a plz repo
-	configPath := path.Join(core.RepoRoot, ".plzconfig")
+	configPath := filepath.Join(core.RepoRoot, ".plzconfig")
 	if !fs.FileExists(configPath) {
-		log.Fatalf("You don't appear to be in a plz repo.")
+		return fmt.Errorf("You don't appear to be in a plz repo.")
 	}
 
 	configFile, err := os.Open(configPath)
 	if err != nil {
-		log.Fatalf("Failed to open plz config file")
+		return fmt.Errorf("Failed to open plz config file")
 	}
 	defer configFile.Close()
 
@@ -50,17 +49,18 @@ func InitPlugins(plugins []string) {
 	file := ast.Read(configFile)
 
 	for _, p := range plugins {
-		file, err = initPlugin(p, file)
+		file, err = initPlugin(p, version, file)
 		if err != nil {
-			log.Errorf("Could not initialise plugin %s. Got error: %s", p, err)
+			return fmt.Errorf("Could not initialise plugin %s. Got error: %s", p, err)
 		}
 	}
 
 	ast.Write(file, configPath)
+	return nil
 }
 
-func initPlugin(plugin string, file ast.File) (ast.File, error) {
-	if err := createTarget("plugins/BUILD", plugin); err != nil {
+func initPlugin(plugin, version string, file ast.File) (ast.File, error) {
+	if err := createTarget("plugins/BUILD", plugin, version); err != nil {
 		return file, err
 	}
 
@@ -75,6 +75,8 @@ func injectPluginConfig(plugin string, file ast.File) ast.File {
 		return writeJavaConfigFields(file)
 	case "cc":
 		return writeCCConfigFields(file)
+	case "go":
+		return writeGoConfigFields(file)
 	default:
 		return writeFieldsToConfig(plugin, file, nil)
 	}
@@ -137,11 +139,30 @@ func writeJavaConfigFields(file ast.File) ast.File {
 	return writeFieldsToConfig("java", file, configMap)
 }
 
+func writeGoConfigFields(file ast.File) ast.File {
+	configMap := map[string]string{
+		"gotool":           "GoTool",
+		"importpath":       "ImportPath",
+		"cgocctool":        "CCTool",
+		"cgoenabled":       "CGoEnabled",
+		"pleasegotool":     "PleaseGoTool",
+		"delvetool":        "DelveTool",
+		"defaultstatic":    "DefaultStatic",
+		"gotestrootcompat": "TestRootCompat",
+		"cflags":           "CFlags",
+		"ldflags":          "LdFlags",
+	}
+
+	return writeFieldsToConfig("go", file, configMap)
+}
+
 func writeFieldsToConfig(plugin string, file ast.File, configMap map[string]string) ast.File {
 	section := "Plugin"
 
+	pluginName := strings.ReplaceAll(plugin, "-", "_")
+
 	// Check for existing plugin section
-	if s := file.MaybeGetSection(section, plugin); s != nil {
+	if s := file.MaybeGetSection(section, pluginName); s != nil {
 		info("Plugin config section already exists, so init did nothing.")
 		return file
 	}
@@ -150,19 +171,19 @@ func writeFieldsToConfig(plugin string, file ast.File, configMap map[string]stri
 	// TODO(sam): We can get the actual name of the package containing the build_defs
 	// if we build the plugin target, which we do below. Refactor this to build the target
 	// earlier and use the build_defs dir specified in the plugin config
-	subincludeStr := "///" + plugin + "//build_defs:" + plugin
+	subincludeStr := "///" + pluginName + "//build_defs:" + pluginName
 	file = ast.InjectField(file, "preloadsubincludes", subincludeStr, "parse", "", true)
 
 	// Write plugin target value
-	file = ast.InjectField(file, "Target", "//plugins:"+plugin, section, plugin, false)
+	file = ast.InjectField(file, "Target", "//plugins:"+pluginName, section, pluginName, false)
 
 	// Migrate any existing language fields to their plugin equivalents
 	if configMap != nil {
 		for _, s := range file.Sections {
-			if s.Key == plugin {
+			if s.Key == pluginName {
 				for _, field := range s.Fields {
 					if plugVal, ok := configMap[strings.ToLower(field.Name)]; ok {
-						file = ast.InjectField(file, plugVal, field.Value, section, plugin, true)
+						file = ast.InjectField(file, plugVal, field.Value, section, pluginName, true)
 					}
 				}
 			}
@@ -174,7 +195,7 @@ func writeFieldsToConfig(plugin string, file ast.File, configMap map[string]stri
 
 // targetExistsInFile checks to see if the plugin target already exists
 // in plugins/BUILD
-func targetExistsInFile(location, plugin string) bool {
+func targetExistsInFile(location, target string) bool {
 	if !fs.FileExists(location) {
 		return false
 	}
@@ -186,7 +207,8 @@ func targetExistsInFile(location, plugin string) bool {
 
 	//TODO: Might want to pull in the state object here one day so we can query the build
 	// graph instead of using regexp
-	str := "plugin_repo\\(.+name = \"" + plugin + "\""
+
+	str := "plugin_repo\\(.+name = \"" + target + "\""
 	exists, err := regexp.Match("(?s)"+str, b)
 	if err != nil {
 		panic(err)
@@ -195,8 +217,9 @@ func targetExistsInFile(location, plugin string) bool {
 }
 
 // createTarget writes the plugin target to plugins/BUILD
-func createTarget(location, plugin string) error {
-	if targetExistsInFile(location, plugin) {
+func createTarget(location, plugin, version string) error {
+	pluginTarget := strings.ReplaceAll(plugin, "-", "_")
+	if targetExistsInFile(location, pluginTarget) {
 		return nil
 	}
 
@@ -210,11 +233,14 @@ func createTarget(location, plugin string) error {
 		return err
 	}
 	defer f.Close()
-	revision, err := getLatestRevision(plugin)
-	if err != nil {
-		return err
+	if version == "" {
+		revision, err := getLatestRevision(plugin)
+		if err != nil {
+			return err
+		}
+		version = revision
 	}
-	_, err = fmt.Fprintf(f, pluginRepoTemplate, plugin, revision, plugin)
+	_, err = fmt.Fprintf(f, pluginRepoTemplate, pluginTarget, version, plugin)
 
 	return err
 }
@@ -247,6 +273,8 @@ func getLatestRevision(plugin string) (string, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
+	} else if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Failed to download plugin: %s %s", resp.Status, string(body))
 	}
 
 	var result Response

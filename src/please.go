@@ -7,7 +7,6 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
@@ -47,7 +46,6 @@ import (
 	"github.com/thought-machine/please/src/tool"
 	"github.com/thought-machine/please/src/update"
 	"github.com/thought-machine/please/src/watch"
-	"github.com/thought-machine/please/src/worker"
 )
 
 var log = logging.Log
@@ -84,7 +82,7 @@ var opts struct {
 
 	BehaviorFlags struct {
 		NoUpdate           bool    `long:"noupdate" description:"Disable Please attempting to auto-update itself."`
-		NoHashVerification bool    `long:"nohash_verification" description:"Hash verification errors are nonfatal."`
+		NoHashVerification bool    `long:"nohash_verification" description:"Hash verification errors are nonfatal." env:"PLZ_NO_HASH_VERIFICATION"`
 		NoLock             bool    `long:"nolock" description:"Don't attempt to lock the repo exclusively. Use with care."`
 		KeepWorkdirs       bool    `long:"keep_workdirs" description:"Don't clean directories in plz-out/tmp after successfully building targets."`
 		HTTPProxy          cli.URL `long:"http_proxy" env:"HTTP_PROXY" description:"HTTP proxy to use for downloads"`
@@ -105,7 +103,6 @@ var opts struct {
 	Complete         string `long:"complete" hidden:"true" env:"PLZ_COMPLETE" description:"Provide completion options for this build target."`
 
 	Build struct {
-		Prepare    bool   `long:"prepare" description:"Prepare build directory for these targets but don't build them."`
 		Shell      string `long:"shell" choice:"shell" choice:"run" optional:"true" optional-value:"shell" description:"Like --prepare, but opens a shell in the build directory with the appropriate environment variables."`
 		Rebuild    bool   `long:"rebuild" description:"To force the optimisation and rebuild one or more targets."`
 		NoDownload bool   `long:"nodownload" hidden:"true" description:"Don't download outputs after building. Only applies when using remote build execution."`
@@ -156,8 +153,8 @@ var opts struct {
 		IncludeFile         cli.Filepaths `long:"include_file" description:"Filenames to filter coverage display to. Supports shell pattern matching e.g. file/path/*."`
 		TestResultsFile     cli.Filepath  `long:"test_results_file" default:"plz-out/log/test_results.xml" description:"File to write combined test results to."`
 		SurefireDir         cli.Filepath  `long:"surefire_dir" default:"plz-out/surefire-reports" description:"Directory to copy XML test results to."`
-		CoverageResultsFile cli.Filepath  `long:"coverage_results_file" default:"plz-out/log/coverage.json" description:"File to write combined coverage results to."`
-		CoverageXMLReport   cli.Filepath  `long:"coverage_xml_report" default:"plz-out/log/coverage.xml" description:"XML File to write combined coverage results to."`
+		CoverageResultsFile cli.Filepath  `long:"coverage_results_file" env:"COVERAGE_RESULTS_FILE" default:"plz-out/log/coverage.json" description:"File to write combined coverage results to."`
+		CoverageXMLReport   cli.Filepath  `long:"coverage_xml_report" env:"COVERAGE_XML_REPORT" default:"plz-out/log/coverage.xml" description:"XML File to write combined coverage results to."`
 		Incremental         bool          `short:"i" long:"incremental" description:"Calculates summary statistics for incremental coverage, i.e. stats for just the lines currently modified."`
 		ShowOutput          bool          `short:"s" long:"show_output" description:"Always show output of tests, even on success."`
 		DebugFailingTest    bool          `short:"d" long:"debug" description:"Allows starting an interactive debugger on test failure. Does not work with all test types (currently only python/pytest). Implies -c dbg unless otherwise set."`
@@ -172,9 +169,9 @@ var opts struct {
 	} `command:"cover" description:"Builds and tests one or more targets, and calculates coverage."`
 
 	Debug struct {
-		Debugger string `short:"d" long:"debugger" description:"Name of supported debugger"`
-		Port     int    `short:"p" long:"port" description:"Debugging server port"`
-		Args     struct {
+		Port int               `short:"p" long:"port" description:"Debugging server port"`
+		Env  map[string]string `short:"e" long:"env" description:"Environment variables to set for the debugged process"`
+		Args struct {
 			Target core.BuildLabel `positional-arg-name:"target" description:"Target to debug"`
 			Args   []string        `positional-arg-name:"arguments" description:"Arguments to pass to target"`
 		} `positional-args:"true"`
@@ -190,21 +187,20 @@ var opts struct {
 		Cmd        string `long:"cmd" description:"Overrides the command to be run. This is useful when the initial command needs to be wrapped in another one." default:""`
 		Parallel   struct {
 			NumTasks       int                `short:"n" long:"num_tasks" default:"10" description:"Maximum number of subtasks to run in parallel"`
-			Quiet          bool               `short:"q" long:"quiet" description:"Deprecated in favour of --output=quiet. Suppress output from successful subprocesses."`
 			Output         process.OutputMode `long:"output" default:"default" choice:"default" choice:"quiet" choice:"group_immediate" description:"Allows to control how the output should be handled."`
 			PositionalArgs struct {
-				Targets []core.AnnotatedOutputLabel `positional-arg-name:"target" description:"Targets to run"`
+				Targets TargetsOrArgs `positional-arg-name:"target" required:"true" description:"Target to run"`
 			} `positional-args:"true" required:"true"`
-			Args   cli.Filepaths `short:"a" long:"arg" description:"Arguments to pass to the called processes."`
+			Args   cli.Filepaths `short:"a" long:"arg" description:"Arguments to pass to the target. Deprecated, pass them directly as arguments (after -- if needed)"`
 			Detach bool          `long:"detach" description:"Detach from the parent process when all children have spawned"`
 		} `command:"parallel" description:"Runs a sequence of targets in parallel"`
 		Sequential struct {
 			Quiet          bool               `short:"q" long:"quiet" description:"Suppress output from successful subprocesses."`
 			Output         process.OutputMode `long:"output" default:"default" choice:"default" choice:"quiet" choice:"group_immediate" description:"Allows to control how the output should be handled."`
 			PositionalArgs struct {
-				Targets []core.AnnotatedOutputLabel `positional-arg-name:"target" description:"Targets to run"`
+				Targets TargetsOrArgs `positional-arg-name:"target" required:"true" description:"Target to run"`
 			} `positional-args:"true" required:"true"`
-			Args cli.Filepaths `short:"a" long:"arg" description:"Arguments to pass to the called processes."`
+			Args cli.Filepaths `short:"a" long:"arg" description:"Arguments to pass to the target. Deprecated, pass them directly as arguments (after -- if needed)"`
 		} `command:"sequential" description:"Runs a sequence of targets sequentially."`
 		Args struct {
 			Target core.AnnotatedOutputLabel `positional-arg-name:"target" required:"true" description:"Target to run"`
@@ -224,8 +220,8 @@ var opts struct {
 			Mount   bool `long:"share_mount" description:"Share mount namespace"`
 		} `group:"Options to override mount and network namespacing on linux, if configured"`
 		Args struct {
-			Target              core.AnnotatedOutputLabel `positional-arg-name:"target" required:"true" description:"Target to execute"`
-			OverrideCommandArgs []string                  `positional-arg-name:"override_command" description:"Override command"`
+			Target core.AnnotatedOutputLabel `positional-arg-name:"target" required:"true" description:"Target to execute"`
+			Args   []string                  `positional-arg-name:"arg" description:"Arguments to the executed command"`
 		} `positional-args:"true"`
 		Sequential struct {
 			Args struct {
@@ -251,9 +247,11 @@ var opts struct {
 	} `command:"clean" description:"Cleans build artifacts" subcommands-optional:"true"`
 
 	Watch struct {
-		Run  bool `short:"r" long:"run" description:"Runs the specified targets when they change (default is to build or test as appropriate)."`
-		Args struct {
-			Targets []core.BuildLabel `positional-arg-name:"targets" required:"true" description:"Targets to watch the sources of for changes"`
+		Run    bool `short:"r" long:"run" description:"Runs the specified targets when they change (default is to build or test as appropriate)."`
+		NoTest bool `long:"notest" description:"If set, no tests will be ran. The targets will only be re-built."`
+		Args   struct {
+			Target core.BuildLabel `positional-arg-name:"target" description:"Target to watch for changes"`
+			Args   TargetsOrArgs   `positional-arg-name:"arguments" description:"Additional targets to watch, or test selectors"`
 		} `positional-args:"true" required:"true"`
 	} `command:"watch" description:"Watches sources of targets for changes and rebuilds them"`
 
@@ -287,7 +285,8 @@ var opts struct {
 		Pleasew struct {
 		} `command:"pleasew" description:"Initialises the pleasew wrapper script"`
 		Plugin struct {
-			Args struct {
+			Version string `short:"v" long:"version" description:"Version of plugin to install. If not set, the latest is found."`
+			Args    struct {
 				Plugins []string `positional-arg-name:"plugin" required:"true" description:"Plugins to install"`
 			} `positional-args:"true"`
 		} `command:"plugin" hidden:"true" description:"Install a plugin and migrate any language-specific config values"`
@@ -334,13 +333,14 @@ var opts struct {
 
 	Tool struct {
 		Args struct {
-			Tool tool.Tool     `positional-arg-name:"tool" description:"Tool to invoke (jarcat, lint, etc)"`
+			Tool tool.Tool     `positional-arg-name:"tool" description:"Tool to invoke (arcat, lint, etc)"`
 			Args cli.Filepaths `positional-arg-name:"arguments" description:"Arguments to pass to the tool"`
 		} `positional-args:"true"`
 	} `command:"tool" hidden:"true" description:"Invoke one of Please's sub-tools"`
 
 	Query struct {
 		Deps struct {
+			DOT    bool `long:"dot" description:"Output in dot format"`
 			Hidden bool `long:"hidden" short:"h" description:"Output internal / hidden dependencies too"`
 			Level  int  `long:"level" default:"-1" description:"Levels of the dependencies to retrieve."`
 			Unique bool `long:"unique" hidden:"true" description:"Has no effect, only exists for compatibility."`
@@ -356,7 +356,8 @@ var opts struct {
 			} `positional-args:"true" required:"true"`
 		} `command:"revdeps" alias:"reverseDeps" description:"Queries all the reverse dependencies of a target."`
 		SomePath struct {
-			Hidden bool `long:"hidden" description:"Show hidden targets as well"`
+			Except []core.BuildLabel `long:"except" description:"Targets to exclude from path calculation"`
+			Hidden bool              `long:"hidden" description:"Show hidden targets as well"`
 			Args   struct {
 				Target1 core.BuildLabel `positional-arg-name:"target1" description:"First build target" required:"true"`
 				Target2 core.BuildLabel `positional-arg-name:"target2" description:"Second build target" required:"true"`
@@ -397,7 +398,7 @@ var opts struct {
 			Args struct {
 				Targets []core.BuildLabel `positional-arg-name:"targets" description:"Targets to render graph for"`
 			} `positional-args:"true"`
-		} `command:"graph" description:"Prints a JSON representation of the build graph."`
+		} `command:"graph" description:"Prints a representation of the build graph."`
 		WhatInputs struct {
 			Hidden    bool `long:"hidden" short:"h" description:"Output internal / hidden targets too."`
 			EchoFiles bool `long:"echo_files" description:"Echo the file for which the printed output is responsible."`
@@ -413,12 +414,13 @@ var opts struct {
 		} `command:"whatoutputs" description:"Prints out target(s) responsible for outputting provided file(s)"`
 		Rules struct {
 			Args struct {
-				Targets []core.BuildLabel `hidden:"true" description:"deprecated, has no effect"`
+				Files cli.StdinStrings `positional-arg-name:"files" description:"Files to parse for build rules." hidden:"true"`
 			} `positional-args:"true"`
 		} `command:"rules" description:"Prints built-in rules to stdout as JSON"`
 		Changes struct {
 			Since            string `short:"s" long:"since" default:"origin/master" description:"Revision to compare against"`
 			IncludeDependees string `long:"include_dependees" default:"none" choice:"none" choice:"direct" choice:"transitive" description:"Deprecated: use level 1 for direct and -1 for transitive. Include direct or transitive dependees of changed targets."`
+			IncludeSubrepos  bool   `long:"include_subrepos" description:"Include changed targets that belong to subrepos."`
 			Level            int    `long:"level" default:"-2" description:"Levels of the dependencies of changed targets (-1 for unlimited)." default-mask:"0"`
 			Inexact          bool   `long:"inexact" description:"Calculate changes more quickly and without doing any SCM checkouts, but may miss some targets."`
 			In               string `long:"in" description:"Calculate changes contained within given scm spec (commit range/sha/ref/etc). Implies --inexact."`
@@ -426,12 +428,6 @@ var opts struct {
 				Files cli.StdinStrings `positional-arg-name:"files" description:"Files to calculate changes for. Overrides flags relating to SCM operations."`
 			} `positional-args:"true"`
 		} `command:"changes" description:"Calculates the set of changed targets in regard to a set of modified files or SCM commits."`
-		Roots struct {
-			Hidden bool `long:"hidden" description:"Show hidden targets as well"`
-			Args   struct {
-				Targets []core.BuildLabel `positional-arg-name:"targets" description:"Targets to query" required:"true"`
-			} `positional-args:"true"`
-		} `command:"roots" description:"Show build labels with no dependents in the given list, from the list."`
 		Filter struct {
 			Hidden bool `long:"hidden" description:"Show hidden targets as well"`
 			Args   struct {
@@ -505,8 +501,12 @@ var buildFunctions = map[string]func() int{
 			}
 			stats = test.CalculateIncrementalStats(state, lines)
 		}
-		test.WriteCoverageToFileOrDie(state.Coverage, string(opts.Cover.CoverageResultsFile), stats)
-		test.WriteXMLCoverageToFileOrDie(targets, state.Coverage, string(opts.Cover.CoverageXMLReport))
+		if opts.Cover.CoverageResultsFile != "" {
+			test.WriteCoverageToFileOrDie(state.Coverage, string(opts.Cover.CoverageResultsFile), stats)
+		}
+		if opts.Cover.CoverageXMLReport != "" {
+			test.WriteXMLCoverageToFileOrDie(targets, state.Coverage, string(opts.Cover.CoverageXMLReport))
+		}
 
 		if opts.Cover.LineCoverageReport && success {
 			output.PrintLineCoverageReport(state, opts.Cover.IncludeFile.AsStrings())
@@ -519,15 +519,11 @@ var buildFunctions = map[string]func() int{
 		return toExitCode(success, state)
 	},
 	"debug": func() int {
-		if len(opts.Debug.Debugger) > 0 {
-			log.Warningf("--debugger has been deprecated in favour of build rule specific config fields and will be removed in v17.")
-		}
-
 		success, state := runBuild([]core.BuildLabel{opts.Debug.Args.Target}, true, false, false)
 		if !success {
 			return toExitCode(success, state)
 		}
-		return debug.Debug(state, opts.Debug.Args.Target, opts.Debug.Args.Args)
+		return debug.Debug(state, opts.Debug.Args.Target, opts.Debug.Args.Args, exec.ConvertEnv(opts.Debug.Env))
 	},
 	"exec": func() int {
 		success, state := runBuild([]core.BuildLabel{opts.Exec.Args.Target.BuildLabel}, true, false, false)
@@ -538,7 +534,7 @@ var buildFunctions = map[string]func() int{
 		target := state.Graph.TargetOrDie(opts.Exec.Args.Target.BuildLabel)
 		dir := target.ExecDir()
 		shouldSandbox := target.Sandbox
-		if code := exec.Exec(state, opts.Exec.Args.Target, dir, exec.ConvertEnv(opts.Exec.Env), opts.Exec.Args.OverrideCommandArgs, false, process.NewSandboxConfig(shouldSandbox && !opts.Exec.Share.Network, shouldSandbox && !opts.Exec.Share.Mount)); code != 0 {
+		if code := exec.Exec(state, opts.Exec.Args.Target, dir, exec.ConvertEnv(opts.Exec.Env), nil, opts.Exec.Args.Args, false, process.NewSandboxConfig(shouldSandbox && !opts.Exec.Share.Network, shouldSandbox && !opts.Exec.Share.Mount)); code != 0 {
 			return code
 		}
 
@@ -583,9 +579,6 @@ var buildFunctions = map[string]func() int{
 			var dir string
 			if opts.Run.WD != "" {
 				dir = getAbsolutePath(opts.Run.WD, originalWorkingDirectory)
-			} else if opts.Run.InWD {
-				log.Warningf("--in_wd is deprecated in favour of --wd=. and will be removed in v17.")
-				dir = originalWorkingDirectory
 			}
 
 			if opts.Run.EntryPoint != "" {
@@ -602,41 +595,32 @@ var buildFunctions = map[string]func() int{
 		return 1 // We should never return from run.Run so if we make it here something's wrong.
 	},
 	"run.parallel": func() int {
-		if success, state := runBuild(unannotateLabels(opts.Run.Parallel.PositionalArgs.Targets), true, false, false); success {
+		annotated, unannotated, args := opts.Run.Parallel.PositionalArgs.Targets.Separate()
+		if success, state := runBuild(unannotated, true, false, false); success {
 			var dir string
 			if opts.Run.WD != "" {
 				dir = getAbsolutePath(opts.Run.WD, originalWorkingDirectory)
-			} else if opts.Run.InWD {
-				log.Warningf("--in_wd is deprecated in favour of --wd=. and will be removed in v17.")
-				dir = originalWorkingDirectory
 			}
-			ls := state.ExpandOriginalMaybeAnnotatedLabels(opts.Run.Parallel.PositionalArgs.Targets)
 			output := opts.Run.Parallel.Output
-			if opts.Run.Parallel.Quiet {
-				log.Warningf("--quiet has been deprecated in favour of --output=quiet and will be removed in v17.")
-				output = process.Quiet
-			}
-			os.Exit(run.Parallel(context.Background(), state, ls, opts.Run.Parallel.Args.AsStrings(), opts.Run.Parallel.NumTasks, output, opts.Run.Remote, opts.Run.Env, opts.Run.Parallel.Detach, opts.Run.InTempDir, dir))
+			args = append(args, opts.Run.Sequential.Args.AsStrings()...)
+			os.Exit(run.Parallel(context.Background(), state, annotated, args, opts.Run.Parallel.NumTasks, output, opts.Run.Remote, opts.Run.Env, opts.Run.Parallel.Detach, opts.Run.InTempDir, dir))
 		}
 		return 1
 	},
 	"run.sequential": func() int {
-		if success, state := runBuild(unannotateLabels(opts.Run.Sequential.PositionalArgs.Targets), true, false, false); success {
+		annotated, unannotated, args := opts.Run.Sequential.PositionalArgs.Targets.Separate()
+		if success, state := runBuild(unannotated, true, false, false); success {
 			var dir string
 			if opts.Run.WD != "" {
 				dir = getAbsolutePath(opts.Run.WD, originalWorkingDirectory)
-			} else if opts.Run.InWD {
-				log.Warningf("--in_wd is deprecated in favour of --wd=. and will be removed in v17.")
-				dir = originalWorkingDirectory
 			}
 			output := opts.Run.Sequential.Output
 			if opts.Run.Sequential.Quiet {
 				log.Warningf("--quiet has been deprecated in favour of --output=quiet and will be removed in v17.")
 				output = process.Quiet
 			}
-
-			ls := state.ExpandOriginalMaybeAnnotatedLabels(opts.Run.Sequential.PositionalArgs.Targets)
-			os.Exit(run.Sequential(state, ls, opts.Run.Sequential.Args.AsStrings(), output, opts.Run.Remote, opts.Run.Env, opts.Run.InTempDir, dir))
+			args = append(args, opts.Run.Sequential.Args.AsStrings()...)
+			os.Exit(run.Sequential(state, annotated, args, output, opts.Run.Remote, opts.Run.Env, opts.Run.InTempDir, dir))
 		}
 		return 1
 	},
@@ -726,7 +710,9 @@ var buildFunctions = map[string]func() int{
 		return 0
 	},
 	"init.plugin": func() int {
-		plzinit.InitPlugins(opts.Init.Plugin.Args.Plugins)
+		if err := plzinit.InitPlugins(opts.Init.Plugin.Args.Plugins, opts.Init.Plugin.Version); err != nil {
+			log.Fatalf("%s", err)
+		}
 		return 0
 	},
 	"export": func() int {
@@ -751,7 +737,7 @@ var buildFunctions = map[string]func() int{
 	},
 	"query.deps": func() int {
 		return runQuery(true, opts.Query.Deps.Args.Targets, func(state *core.BuildState) {
-			query.Deps(state, state.ExpandOriginalLabels(), opts.Query.Deps.Hidden, opts.Query.Deps.Level)
+			query.Deps(state, state.ExpandOriginalLabels(), opts.Query.Deps.Hidden, opts.Query.Deps.Level, opts.Query.Deps.DOT)
 		})
 	},
 	"query.revdeps": func() int {
@@ -764,7 +750,7 @@ var buildFunctions = map[string]func() int{
 		a := plz.ReadStdinLabels([]core.BuildLabel{opts.Query.SomePath.Args.Target1})
 		b := plz.ReadStdinLabels([]core.BuildLabel{opts.Query.SomePath.Args.Target2})
 		return runQuery(true, append(a, b...), func(state *core.BuildState) {
-			if err := query.SomePath(state.Graph, a, b, opts.Query.SomePath.Hidden); err != nil {
+			if err := query.SomePath(state.Graph, a, b, opts.Query.SomePath.Except, opts.Query.SomePath.Hidden); err != nil {
 				fmt.Printf("%s\n", err)
 				os.Exit(1)
 			}
@@ -797,9 +783,9 @@ var buildFunctions = map[string]func() int{
 		if opts.Query.Completions.Cmd == "help" {
 			// Special-case completing help topics rather than build targets.
 			if len(fragments) == 0 {
-				help.Topics("")
+				help.Topics("", config)
 			} else {
-				help.Topics(fragments[0])
+				help.Topics(fragments[0], config)
 			}
 			return 0
 		}
@@ -844,6 +830,18 @@ var buildFunctions = map[string]func() int{
 	},
 	"query.whatinputs": func() int {
 		files := opts.Query.WhatInputs.Args.Files.Get()
+		// Make all these relative to the repo root; many things do not work if they're absolute.
+		for i, file := range files {
+			if filepath.IsAbs(file) {
+				rel, err := filepath.Rel(core.RepoRoot, file)
+				if err != nil {
+					log.Fatalf("Failed to make input relative to repo root: %s", err)
+				} else if strings.HasPrefix(rel, "..") {
+					log.Fatalf("Input %s does not lie within this repo (relative path: %s)", file, rel)
+				}
+				files[i] = rel
+			}
+		}
 		// We only need this to retrieve the BuildFileName
 		state := core.NewBuildState(config)
 		labels := make([]core.BuildLabel, 0, len(files))
@@ -860,12 +858,13 @@ var buildFunctions = map[string]func() int{
 		})
 	},
 	"query.rules": func() int {
-		help.PrintRuleArgs()
+		help.PrintRuleArgs(opts.Query.Rules.Args.Files)
 		return 0
 	},
 	"query.changes": func() int {
 		// query changes always excludes 'manual' targets.
 		opts.BuildFlags.Exclude = append(opts.BuildFlags.Exclude, "manual", "manual:"+core.OsArch)
+		includeSubrepos := opts.Query.Changes.IncludeSubrepos
 		level := opts.Query.Changes.Level // -2 means unset -1 means all transitive
 		transitive := opts.Query.Changes.IncludeDependees == "transitive"
 		direct := opts.Query.Changes.IncludeDependees == "direct"
@@ -886,7 +885,7 @@ var buildFunctions = map[string]func() int{
 		}
 		runInexact := func(files []string) int {
 			return runQuery(true, core.WholeGraph, func(state *core.BuildState) {
-				for _, target := range query.Changes(state, files, level) {
+				for _, target := range query.Changes(state, files, level, includeSubrepos) {
 					fmt.Println(target.String())
 				}
 			})
@@ -918,15 +917,10 @@ var buildFunctions = map[string]func() int{
 		if !success {
 			return 1
 		}
-		for _, target := range query.DiffGraphs(before, after, files, level) {
+		for _, target := range query.DiffGraphs(before, after, files, level, includeSubrepos) {
 			fmt.Println(target.String())
 		}
 		return 0
-	},
-	"query.roots": func() int {
-		return runQuery(true, opts.Query.Roots.Args.Targets, func(state *core.BuildState) {
-			query.Roots(state.Graph, state.ExpandOriginalLabels(), opts.Query.Roots.Hidden)
-		})
 	},
 	"query.filter": func() int {
 		return runQuery(false, opts.Query.Filter.Args.Targets, func(state *core.BuildState) {
@@ -949,10 +943,11 @@ var buildFunctions = map[string]func() int{
 		return 0
 	},
 	"watch": func() int {
+		targets, args := testTargets(opts.Watch.Args.Target, opts.Watch.Args.Args, false, "")
 		// Don't ask it to test now since we don't know if any of them are tests yet.
-		success, state := runBuild(opts.Watch.Args.Targets, true, false, false)
+		success, state := runBuild(targets, true, false, false)
 		state.NeedRun = opts.Watch.Run
-		watch.Watch(state, state.ExpandOriginalLabels(), runPlease)
+		watch.Watch(state, state.ExpandOriginalLabels(), args, opts.Watch.NoTest, runPlease)
 		return toExitCode(success, state)
 	},
 	"generate": func() int {
@@ -1102,11 +1097,8 @@ func Please(targets []core.BuildLabel, config *core.Configuration, shouldBuild, 
 	state.NeedTests = shouldTest
 	state.NeedRun = !opts.Run.Args.Target.IsEmpty() || len(opts.Run.Parallel.PositionalArgs.Targets) > 0 || len(opts.Run.Sequential.PositionalArgs.Targets) > 0 || !opts.Exec.Args.Target.IsEmpty() || len(opts.Exec.Sequential.Args.Targets) > 0 || len(opts.Exec.Parallel.Args.Targets) > 0 || opts.Tool.Args.Tool != "" || debug
 	state.NeedHashesOnly = len(opts.Hash.Args.Targets) > 0
-	if opts.Build.Prepare {
-		log.Warningf("--prepare has been deprecated in favour of --shell and will be removed in v17.")
-	}
-	state.PrepareOnly = opts.Build.Prepare || opts.Build.Shell != "" || opts.Test.Shell != "" || opts.Cover.Shell != ""
-	state.Watch = len(opts.Watch.Args.Targets) > 0
+	state.PrepareOnly = opts.Build.Shell != "" || opts.Test.Shell != "" || opts.Cover.Shell != ""
+	state.Watch = !opts.Watch.Args.Target.IsEmpty()
 	state.CleanWorkdirs = !opts.BehaviorFlags.KeepWorkdirs
 	state.ForceRebuild = opts.Build.Rebuild || opts.Run.Rebuild
 	state.ForceRerun = opts.Test.Rerun || opts.Cover.Rerun
@@ -1136,10 +1128,6 @@ func Please(targets []core.BuildLabel, config *core.Configuration, shouldBuild, 
 
 	if opts.Run.InTempDir && opts.Run.WD != "" {
 		log.Fatal("Can't use both --in_temp_dir and --wd at the same time")
-	} else if opts.Run.InTempDir && opts.Run.InWD {
-		log.Fatal("Can't use both --in_temp_dir and --in_wd at the same time")
-	} else if opts.Run.WD != "" && opts.Run.InWD {
-		log.Fatal("Can't use both --in_wd and --wd at the same time. --in_wd is deprecated in favour of --wd.")
 	}
 
 	runPlease(state, targets)
@@ -1223,7 +1211,15 @@ type TargetsOrArgs []TargetOrArg
 func (l TargetsOrArgs) Separate() (annotated []core.AnnotatedOutputLabel, unannotated []core.BuildLabel, args []string) {
 	for _, arg := range l {
 		if l, _ := arg.label.Label(); l.IsEmpty() {
-			args = append(args, arg.arg)
+			if arg.arg == "-" {
+				labels := plz.ReadAndParseStdinLabels()
+				unannotated = append(unannotated, labels...)
+				for _, label := range labels {
+					annotated = append(annotated, core.AnnotatedOutputLabel{BuildLabel: label})
+				}
+			} else {
+				args = append(args, arg.arg)
+			}
 		} else {
 			annotated = append(annotated, arg.label)
 			unannotated = append(unannotated, arg.label.BuildLabel)
@@ -1311,8 +1307,8 @@ func mustReadConfigAndSetRoot(forceUpdate bool) *core.Configuration {
 	}
 	// Reset this now we're at the repo root.
 	if opts.OutputFlags.LogFile != "" {
-		if !path.IsAbs(string(opts.OutputFlags.LogFile)) {
-			opts.OutputFlags.LogFile = cli.Filepath(path.Join(core.RepoRoot, string(opts.OutputFlags.LogFile)))
+		if !filepath.IsAbs(string(opts.OutputFlags.LogFile)) {
+			opts.OutputFlags.LogFile = cli.Filepath(filepath.Join(core.RepoRoot, string(opts.OutputFlags.LogFile)))
 		}
 		cli.InitFileLogging(string(opts.OutputFlags.LogFile), opts.OutputFlags.LogFileLevel, opts.OutputFlags.LogAppend)
 	}
@@ -1321,7 +1317,6 @@ func mustReadConfigAndSetRoot(forceUpdate bool) *core.Configuration {
 	}
 	config := readConfig()
 	// Now apply any flags that override this
-	config.Profiling = opts.Profile != ""
 	if opts.Update.Latest || opts.Update.LatestPrerelease {
 		config.Please.Version.Unset()
 	} else if opts.Update.Version.IsSet {
@@ -1353,13 +1348,13 @@ func handleCompletions(parser *flags.Parser, items []flags.Completion) {
 // Capture aliases from config file and print to the help output
 func additionalUsageInfo(parser *flags.Parser, wr io.Writer) {
 	cli.InitLogging(cli.MinVerbosity)
-	if config, err := readConfigAndSetRoot(false); err == nil {
+	if config, err := readConfigAndSetRoot(false); err == nil && parser.Active == nil {
 		config.PrintAliases(wr)
 	}
 }
 
 func getCompletions(qry string) (*query.CompletionPackages, []string) {
-	binary := opts.Query.Completions.Cmd == "run"
+	binary := opts.Query.Completions.Cmd == "run" || opts.Query.Completions.Cmd == "exec"
 	isTest := opts.Query.Completions.Cmd == "test" || opts.Query.Completions.Cmd == "cover"
 
 	completions := query.CompletePackages(config, qry)
@@ -1449,14 +1444,6 @@ func initBuild(args []string) string {
 	return command
 }
 
-func unannotateLabels(als []core.AnnotatedOutputLabel) []core.BuildLabel {
-	labels := make([]core.BuildLabel, len(als))
-	for i, al := range als {
-		labels[i] = al.BuildLabel
-	}
-	return labels
-}
-
 func writeGoTraceFile() {
 	if err := runtime.StartTrace(); err != nil {
 		log.Fatalf("failed to start trace: %v", err)
@@ -1537,7 +1524,6 @@ func execute(command string) int {
 			runtime.StopTrace()
 		}()
 	}
-	defer worker.StopAll()
 
 	log.Debugf("plz %v", command)
 	return buildFunctions[command]()

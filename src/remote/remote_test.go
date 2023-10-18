@@ -2,7 +2,6 @@ package remote
 
 import (
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -56,7 +55,7 @@ func TestExecuteBuild(t *testing.T) {
 	// on success).
 	target.PostBuildFunction = testFunction{}
 	target.Command = "echo hello && echo test > $OUT"
-	metadata, err := c.Build(0, target)
+	metadata, err := c.Build(target)
 	assert.NoError(t, err)
 	assert.Equal(t, []byte("hello\n"), metadata.Stdout)
 }
@@ -82,7 +81,7 @@ func TestExecutePostBuildFunction(t *testing.T) {
 		assert.Equal(t, "wibble wibble wibble", output)
 		return nil
 	})
-	_, err := c.Build(0, target)
+	_, err := c.Build(target)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"somefile"}, target.Outputs())
 }
@@ -95,7 +94,7 @@ func TestExecuteFetch(t *testing.T) {
 	target.AddOutput("please_14.2.0.tar.gz")
 	target.Hashes = []string{"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}
 	target.BuildTimeout = time.Minute
-	_, err := c.Build(0, target)
+	_, err := c.Build(target)
 	assert.NoError(t, err)
 }
 
@@ -111,7 +110,7 @@ func TestExecuteTest(t *testing.T) {
 	err := c.Store(target)
 	assert.NoError(t, err)
 	c.state.Graph.AddTarget(target)
-	_, err = c.Test(0, target, 1)
+	_, err = c.Test(target, 1)
 	assert.NoError(t, err)
 
 	results, err := os.ReadFile(filepath.Join(target.TestDir(1), core.TestResultsFile))
@@ -133,7 +132,7 @@ func TestExecuteTestWithCoverage(t *testing.T) {
 	assert.NoError(t, err)
 	target.SetState(core.Built)
 	c.state.Graph.AddTarget(target)
-	_, err = c.Test(0, target, 1)
+	_, err = c.Test(target, 1)
 	assert.NoError(t, err)
 
 	results, err := os.ReadFile(filepath.Join(target.TestDir(1), core.TestResultsFile))
@@ -171,7 +170,7 @@ func TestNoAbsolutePaths(t *testing.T) {
 	testDir := os.Getenv("TEST_DIR")
 	for _, env := range cmd.EnvironmentVariables {
 		if !strings.HasPrefix(env.Value, "//") {
-			assert.False(t, path.IsAbs(env.Value), "Env var %s has an absolute path: %s", env.Name, env.Value)
+			assert.False(t, filepath.IsAbs(env.Value), "Env var %s has an absolute path: %s", env.Name, env.Value)
 			assert.NotContains(t, env.Value, core.OutDir, "Env var %s contains %s: %s", env.Name, core.OutDir, env.Value)
 			assert.NotContains(t, env.Value, testDir, "Env var %s contains the test dir %s: %s", env.Name, testDir, env.Value)
 		}
@@ -189,7 +188,7 @@ func TestNoAbsolutePaths2(t *testing.T) {
 	cmd, _ := c.buildCommand(target, &pb.Directory{}, false, false, false)
 	for _, env := range cmd.EnvironmentVariables {
 		if !strings.HasPrefix(env.Value, "//") {
-			assert.False(t, path.IsAbs(env.Value), "Env var %s has an absolute path: %s", env.Name, env.Value)
+			assert.False(t, filepath.IsAbs(env.Value), "Env var %s has an absolute path: %s", env.Name, env.Value)
 			assert.NotContains(t, env.Value, core.OutDir, "Env var %s contains %s: %s", env.Name, core.OutDir, env.Value)
 		}
 	}
@@ -264,7 +263,7 @@ func TestOutDirsSetOutsOnTarget(t *testing.T) {
 	// Doesn't actually get executed but gives an idea as to how this rule is mocked up
 	outDirTarget.Command = "touch foo/bar.txt && touch foo/baz.txt"
 	c.state.Graph.AddTarget(outDirTarget)
-	_, err := c.Build(0, outDirTarget)
+	_, err := c.Build(outDirTarget)
 	require.NoError(t, err)
 
 	assert.Len(t, outDirTarget.Outputs(), 2)

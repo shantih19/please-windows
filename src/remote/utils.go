@@ -9,7 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -34,6 +34,24 @@ var downloadErrors = metrics.NewCounter(
 	"remote",
 	"tree_digest_download_errors_total",
 	"Number of times the an error has been seen during a tree digest download",
+)
+
+var directoriesStored = metrics.NewCounter(
+	"remote",
+	"dirs_stored_total",
+	"Number of directories cached locally",
+)
+
+var directoriesRetrieved = metrics.NewCounter(
+	"remote",
+	"dirs_retrieved_total",
+	"Number of directories retrieved from cache",
+)
+
+var directoriesDownloaded = metrics.NewCounter(
+	"remote",
+	"dirs_downloaded_total",
+	"Number of directories downloaded from remote",
 )
 
 // xattrName is the name we use to record attributes on files.
@@ -141,6 +159,18 @@ func (c *Client) getOutputsForOutDir(target *core.BuildTarget, outDir core.Outpu
 	return files, dirs, nil
 }
 
+// readDirectory reads a Directory proto, possibly using a local cache, otherwise going to the remote
+func (c *Client) readDirectory(dg *pb.Digest) (*pb.Directory, error) {
+	if dir, present := c.directories.Load(dg.Hash); present {
+		directoriesRetrieved.Inc()
+		return dir.(*pb.Directory), nil
+	}
+	dir := &pb.Directory{}
+	_, err := c.client.ReadProto(context.Background(), digest.NewFromProtoUnvalidated(dg), dir)
+	directoriesDownloaded.Inc()
+	return dir, err
+}
+
 // maybeGetOutDir will get the output directory based on the directory provided. If there's no matching directory, this
 // will return an empty string indicating that that action output was not an output directory.
 func maybeGetOutDir(dir string, outDirs []core.OutputDirectory) core.OutputDirectory {
@@ -181,14 +211,32 @@ func (c *Client) actionURL(digest *pb.Digest, prefix bool) string {
 }
 
 // locallyCacheResults stores the actionresult for an action in the local (usually dir) cache.
-func (c *Client) locallyCacheResults(target *core.BuildTarget, digest *pb.Digest, metadata *core.BuildMetadata, ar *pb.ActionResult) {
+func (c *Client) locallyCacheResults(target *core.BuildTarget, dg *pb.Digest, metadata *core.BuildMetadata, ar *pb.ActionResult) {
 	if c.state.Cache == nil {
 		return
 	}
 	data, _ := proto.Marshal(ar)
 	metadata.RemoteAction = data
 	metadata.Timestamp = time.Now()
-	if err := c.mdStore.storeMetadata(digest.Hash, metadata); err != nil {
+
+	if len(ar.OutputDirectories) > 0 {
+		tree := pb.Tree{}
+		for _, d := range ar.OutputDirectories {
+			t := pb.Tree{}
+			if _, err := c.client.ReadProto(context.Background(), digest.NewFromProtoUnvalidated(d.TreeDigest), &t); err == nil {
+				tree.Children = append(tree.Children, t.Root)
+				tree.Children = append(tree.Children, t.Children...)
+			}
+		}
+		for _, dir := range tree.Children {
+			c.directories.Store(c.digestMessage(dir).Hash, dir)
+		}
+		directoriesStored.Add(float64(len(tree.Children)))
+		data, _ := proto.Marshal(&tree)
+		metadata.RemoteOutputs = data
+	}
+
+	if err := c.mdStore.storeMetadata(dg.Hash, metadata); err != nil {
 		log.Warningf("Failed to store build metadata for target %s: %v", target.Label, err)
 	}
 }
@@ -204,6 +252,14 @@ func (c *Client) retrieveLocalResults(target *core.BuildTarget, digest *pb.Diges
 		if metadata != nil && len(metadata.RemoteAction) > 0 {
 			ar := &pb.ActionResult{}
 			if err := proto.Unmarshal(metadata.RemoteAction, ar); err == nil {
+				if len(metadata.RemoteOutputs) > 0 {
+					tree := pb.Tree{}
+					if err := proto.Unmarshal(metadata.RemoteOutputs, &tree); err == nil {
+						for _, dir := range tree.Children {
+							c.directories.Store(c.digestMessage(dir).Hash, dir)
+						}
+					}
+				}
 				return metadata, ar
 			}
 		}
@@ -290,7 +346,12 @@ func convertError(err *rpcstatus.Status) error {
 	if err.Code == int32(codes.OK) {
 		return nil
 	}
-	msg := fmt.Errorf("%s", err.Message)
+
+	if err.Code == int32(codes.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+
+	msg := status.ErrorProto(err)
 	for _, detail := range err.Details {
 		msg = fmt.Errorf("%s %s", msg, detail.Value)
 	}
@@ -353,7 +414,7 @@ func (b *dirBuilder) dir(dir, child string) *pb.Directory {
 	if !present {
 		d = &pb.Directory{}
 		b.dirs[dir] = d
-		dir, base := path.Split(dir)
+		dir, base := filepath.Split(dir)
 		b.dir(dir, base)
 	}
 	// TODO(peterebden): The linear scan in hasChild is a bit suboptimal, we should
@@ -375,8 +436,8 @@ func (b *dirBuilder) Build(ch chan<- *uploadinfo.Entry) *pb.Directory {
 
 // Node returns either the file or directory corresponding to the given path (or nil for both if not found)
 func (b *dirBuilder) Node(name string) (*pb.DirectoryNode, *pb.FileNode) {
-	dir := b.Dir(path.Dir(name))
-	base := path.Base(name)
+	dir := b.Dir(filepath.Dir(name))
+	base := filepath.Base(name)
 	for _, d := range dir.Directories {
 		if d.Name == base {
 			return d, nil
@@ -402,7 +463,7 @@ func (b *dirBuilder) Tree(root string) *pb.Tree {
 func (b *dirBuilder) tree(tree *pb.Tree, root string, dir *pb.Directory) {
 	tree.Children = append(tree.Children, dir)
 	for _, d := range dir.Directories {
-		name := path.Join(root, d.Name)
+		name := filepath.Join(root, d.Name)
 		b.tree(tree, name, b.dirs[name])
 	}
 }
@@ -413,7 +474,7 @@ func (b *dirBuilder) walk(name string, ch chan<- *uploadinfo.Entry) *pb.Digest {
 	dir := b.dirs[name]
 	for _, d := range dir.Directories {
 		if d.Digest == nil { // It's not nil if we're reusing outputs from an earlier call.
-			d.Digest = b.walk(path.Join(name, d.Name), ch)
+			d.Digest = b.walk(filepath.Join(name, d.Name), ch)
 		}
 	}
 	// The protocol requires that these are sorted into lexicographic order. Not all servers
@@ -487,7 +548,7 @@ func (c *Client) targetPlatformProperties(target *core.BuildTarget) *pb.Platform
 func removeOutputs(target *core.BuildTarget) error {
 	outDir := target.OutDir()
 	for _, out := range target.Outputs() {
-		if err := os.RemoveAll(path.Join(outDir, out)); err != nil {
+		if err := os.RemoveAll(filepath.Join(outDir, out)); err != nil {
 			return fmt.Errorf("Failed to remove output for %s: %s", target, err)
 		}
 	}
@@ -570,7 +631,7 @@ func (c *Client) contextWithMetadata(target *core.BuildTarget) context.Context {
 	const key = "build.bazel.remote.execution.v2.requestmetadata-bin" // as defined by the proto
 	b, _ := proto.Marshal(&pb.RequestMetadata{
 		ActionId:                target.Label.String(),
-		CorrelatedInvocationsId: c.state.Config.Remote.BuildID,
+		CorrelatedInvocationsId: c.buildID,
 		ToolDetails: &pb.ToolDetails{
 			ToolName:    "please",
 			ToolVersion: core.PleaseVersion,

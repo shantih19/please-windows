@@ -38,11 +38,7 @@ func (tok Token) String() string {
 
 // EndPos returns the end position of a token
 func (tok Token) EndPos() Position {
-	end := tok.Pos
-	end.Offset += len(tok.Value)
-	end.Column += len(tok.Value)
-
-	return end
+	return tok.Pos + Position(len(tok.Value))
 }
 
 type namer interface {
@@ -63,7 +59,7 @@ func newLexer(r io.Reader) *lex {
 	// This should work OK as long as BUILD files are relatively small.
 	b, err := io.ReadAll(r)
 	if err != nil {
-		fail(Position{Filename: NameOfReader(r)}, err.Error())
+		fail(NameOfReader(r), 0, err.Error())
 	}
 
 	// TODO(jpoole): we should probably handle this more gracefully
@@ -154,6 +150,11 @@ func (l *lex) Next() Token {
 	return ret
 }
 
+// File creates a new File based on the contents read by this lexer.
+func (l *lex) File() *File {
+	return NewFile(l.filename, l.bytes)
+}
+
 // AssignFollows is a hack to do extra lookahead which makes it easier to parse
 // named call arguments. It returns true if the token after next is an assign operator.
 func (l *lex) AssignFollows() bool {
@@ -171,13 +172,7 @@ func (l *lex) stripSpaces() {
 // nextToken consumes and returns the next token.
 func (l *lex) nextToken() Token {
 	l.stripSpaces()
-	pos := Position{
-		Filename: l.filename,
-		// These are all 1-indexed for niceness.
-		Offset: l.pos + 1,
-		Line:   l.line + 1,
-		Column: l.col + 1,
-	}
+	pos := Position(l.pos)
 	if l.unindents > 0 {
 		l.unindents--
 		return Token{Type: Unindent, Pos: pos}
@@ -216,14 +211,13 @@ func (l *lex) nextToken() Token {
 			l.indent = indent
 		}
 		if lastIndent > l.indent && l.braces == 0 {
-			pos.Line++ // Works better if it's at the new position
-			pos.Column = l.col + 1
+			pos++ // Works better if it's at the new position
 			for l.indents[len(l.indents)-1] > l.indent {
 				l.unindents++
 				l.indents = l.indents[:len(l.indents)-1]
 			}
 			if l.indent != l.indents[len(l.indents)-1] {
-				fail(pos, "Unexpected indent")
+				l.fail(pos, "Unexpected indent")
 			}
 		} else if lastIndent != l.indent {
 			l.indents = append(l.indents, l.indent)
@@ -269,9 +263,9 @@ func (l *lex) nextToken() Token {
 		}
 		return Token{Type: rune(next), Value: string(next), Pos: pos}
 	case '\t':
-		fail(pos, "Tabs are not permitted in BUILD files, use space-based indentation instead")
+		l.fail(pos, "Tabs are not permitted in BUILD files, use space-based indentation instead")
 	default:
-		fail(pos, "Unknown symbol %c", next)
+		l.fail(pos, "Unknown symbol %c", next)
 	}
 	panic("unreachable")
 }
@@ -345,7 +339,7 @@ func (l *lex) consumeString(quote byte, pos Position, multiline, raw, fString bo
 			}
 			fallthrough
 		case 0:
-			fail(pos, "Unterminated string literal")
+			l.fail(pos, "Unterminated string literal")
 		case '\\':
 			if !raw {
 				escaped = true
@@ -370,7 +364,7 @@ func (l *lex) consumeIdent(pos Position) Token {
 			l.pos += n
 			l.col += n
 			if !unicode.IsLetter(c) && !unicode.IsDigit(c) {
-				fail(pos, "Illegal Unicode identifier %c", c)
+				l.fail(pos, "Illegal Unicode identifier %c", c)
 			}
 			s = append(s, c)
 			continue
@@ -390,4 +384,8 @@ func (l *lex) consumeIdent(pos Position) Token {
 			return Token{Type: Ident, Value: string(s), Pos: pos}
 		}
 	}
+}
+
+func (l *lex) fail(pos Position, msg string, args ...interface{}) {
+	fail(l.filename, pos, msg, args...)
 }

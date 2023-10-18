@@ -29,10 +29,12 @@ please_repo_e2e_test(
 
 please_repo_e2e_test(
     name = "std_in_parallel_test",
-    expected_output = {
-        "wibble.txt": "wibble\nwobble",
+    expect_output_contains = {
+        # Bit of a hack... dicts can only have the file once so we copy it to check it contains both.
+        "wibble.txt": "wibble",
+        "wobble.txt": "wobble",
     },
-    plz_command = "echo //src:wibble //src:wobble | plz run parallel - > wibble.txt",
+    plz_command = "echo //src:wibble //src:wobble | plz run parallel - > wibble.txt && cp wibble.txt wobble.txt",
     repo = "test_repo",
 )
 
@@ -76,15 +78,5 @@ please_repo_e2e_test(
         "path/to/some/dir/fruit.txt": "guava",
     },
     plz_command = "mkdir -p path/to/some/dir/ && cd path/to && plz run --wd ./some/dir //src:write_guava_to_file && cd -",
-    repo = "test_repo",
-)
-
-# Test that --wd=. and --in_wd work the same
-please_repo_e2e_test(
-    name = "test_wd_here_works_like_in_wd",
-    expected_output = {
-        "somedir/fruit.txt": "guava\npeach",
-    },
-    plz_command = "mkdir somedir && cd somedir && plz run --wd=. //src:write_guava_to_file && plz run --in_wd //src:write_peach_to_file && cd -",
     repo = "test_repo",
 )

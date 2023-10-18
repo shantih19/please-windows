@@ -1,14 +1,15 @@
 go_library(
     name = "format",
     srcs = ["fmt.go"],
+    pgo_file = "//:pgo",
     visibility = ["//src/..."],
     deps = [
+        "///third_party/go/github.com_bazelbuild_buildtools//build",
+        "///third_party/go/golang.org_x_sync//errgroup",
         "//src/cli/logging",
         "//src/core",
         "//src/fs",
         "//src/plz",
-        "//third_party/go:buildtools",
-        "//third_party/go:errgroup",
     ],
 )
 
@@ -18,7 +19,8 @@ go_test(
     data = ["test_data"],
     deps = [
         ":format",
+        "///third_party/go/github.com_stretchr_testify//assert",
+        "///third_party/go/github.com_stretchr_testify//require",
         "//src/core",
-        "//third_party/go:testify",
     ],
 )

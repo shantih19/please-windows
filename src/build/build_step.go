@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
@@ -19,7 +18,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/shlex"
 	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/go-retryablehttp"
 
@@ -30,7 +28,6 @@ import (
 	"github.com/thought-machine/please/src/generate"
 	"github.com/thought-machine/please/src/metrics"
 	"github.com/thought-machine/please/src/process"
-	"github.com/thought-machine/please/src/worker"
 )
 
 var log = logging.Log
@@ -42,8 +39,6 @@ var errStop = fmt.Errorf("stopping build")
 var httpClient *retryablehttp.Client
 var httpClientOnce sync.Once
 var httpClientLimiter chan struct{}
-
-var magicSourcesWorkerKey = "WORKER"
 
 var successfulRemoteTargetBuildDuration = metrics.NewHistogram(
 	"remote",
@@ -60,18 +55,17 @@ var successfulLocalTargetBuildDuration = metrics.NewHistogram(
 )
 
 // Build implements the core logic for building a single target.
-func Build(tid int, state *core.BuildState, label core.BuildLabel, remote bool) {
-	target := state.Graph.TargetOrDie(label)
+func Build(state *core.BuildState, target *core.BuildTarget, remote bool) {
 	state = state.ForTarget(target)
 	target.SetState(core.Building)
 	start := time.Now()
-	if err := buildTarget(tid, state, target, remote); err != nil {
+	if err := buildTarget(state, target, remote); err != nil {
 		if errors.Is(err, errStop) {
 			target.SetState(core.Stopped)
-			state.LogBuildResult(tid, target, core.TargetBuildStopped, "Build stopped")
+			state.LogBuildResult(target, core.TargetBuildStopped, "Build stopped")
 			return
 		}
-		state.LogBuildError(tid, label, core.TargetBuildFailed, err, "Build failed: %s", err)
+		state.LogBuildError(target.Label, core.TargetBuildFailed, err, "Build failed: %s", err)
 		if err := RemoveOutputs(target); err != nil {
 			log.Errorf("Failed to remove outputs for %s: %s", target.Label, err)
 		}
@@ -119,7 +113,7 @@ func findFilegroupSourcesWithTmpDir(target *core.BuildTarget) []core.BuildLabel 
 	return srcs
 }
 
-func prepareOnly(tid int, state *core.BuildState, target *core.BuildTarget) error {
+func prepareOnly(state *core.BuildState, target *core.BuildTarget) error {
 	if target.IsFilegroup {
 		potentialTargets := findFilegroupSourcesWithTmpDir(target)
 		if len(potentialTargets) > 0 {
@@ -129,7 +123,7 @@ func prepareOnly(tid int, state *core.BuildState, target *core.BuildTarget) erro
 		return fmt.Errorf("can't prepare temporary directory for %s; filegroups don't have temporary directories", target.Label)
 	}
 	// Ensure we have downloaded any previous dependencies if that's relevant.
-	if err := state.DownloadInputsIfNeeded(tid, target, false); err != nil {
+	if err := state.DownloadInputsIfNeeded(target, false); err != nil {
 		return err
 	}
 	if err := prepareDirectories(state.ProcessExecutor, target); err != nil {
@@ -157,7 +151,7 @@ func prepareOnly(tid int, state *core.BuildState, target *core.BuildTarget) erro
 //     b) attempt to fetch the outputs from the cache based on the output hash
 //  3. Actually build the rule
 //  4. Store result in the cache
-func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runRemotely bool) (err error) {
+func buildTarget(state *core.BuildState, target *core.BuildTarget, runRemotely bool) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if e, ok := r.(error); ok {
@@ -178,15 +172,15 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 	// This must run before we can leave this function successfully by any path.
 	if target.PreBuildFunction != nil {
 		log.Debug("Running pre-build function for %s", target.Label)
-		if err := state.Parser.RunPreBuildFunction(tid, state, target); err != nil {
+		if err := state.Parser.RunPreBuildFunction(state, target); err != nil {
 			return err
 		}
 		log.Debug("Finished pre-build function for %s", target.Label)
 	}
 
-	state.LogBuildResult(tid, target, core.TargetBuilding, "Preparing...")
+	state.LogBuildResult(target, core.TargetBuilding, "Preparing...")
 	if state.PrepareOnly && state.IsOriginalTarget(target) && !state.NeedTests {
-		return prepareOnly(tid, state, target)
+		return prepareOnly(state, target)
 	}
 
 	var postBuildOutput string
@@ -199,19 +193,19 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 	}
 
 	if runRemotely {
-		metadata, err = state.RemoteClient.Build(tid, target)
+		metadata, err = state.RemoteClient.Build(target)
 		if err != nil {
 			return err
 		}
 	} else {
 		// Wait if another process is currently building this target
-		state.LogBuildResult(tid, target, core.TargetBuilding, "Acquiring target lock...")
+		state.LogBuildResult(target, core.TargetBuilding, "Acquiring target lock...")
 		file := core.AcquireExclusiveFileLock(target.BuildLockFile())
 		defer core.ReleaseFileLock(file)
-		state.LogBuildResult(tid, target, core.TargetBuilding, "Preparing...")
+		state.LogBuildResult(target, core.TargetBuilding, "Preparing...")
 
 		// Ensure we have downloaded any previous dependencies if that's relevant.
-		if err := state.DownloadInputsIfNeeded(tid, target, false); err != nil {
+		if err := state.DownloadInputsIfNeeded(target, false); err != nil {
 			return err
 		}
 
@@ -234,7 +228,7 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 				addOutDirOutsFromMetadata(target, metadata)
 
 				if target.PostBuildFunction != nil {
-					if err := runPostBuildFunction(tid, state, target, string(metadata.Stdout), ""); err != nil {
+					if err := runPostBuildFunction(state, target, string(metadata.Stdout), ""); err != nil {
 						log.Warning("Error from post-build function for %s: %s; will rebuild", target.Label, err)
 					}
 				}
@@ -247,7 +241,7 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 					copyFilegroupHashes(state, target)
 				}
 				target.SetState(core.Reused)
-				state.LogBuildResult(tid, target, core.TargetCached, "Unchanged")
+				state.LogBuildResult(target, core.TargetCached, "Unchanged")
 				buildLinks(state, target)
 				return nil // Nothing needs to be done.
 			}
@@ -256,16 +250,19 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 		}
 		if target.IsFilegroup {
 			log.Debug("Building %s...", target.Label)
-			if changed, err := buildFilegroup(state, target); err != nil {
+			changed, err := buildFilegroup(state, target)
+			if err != nil {
 				return err
-			} else if _, err := calculateAndCheckRuleHash(state, target); err != nil {
-				return err
-			} else if changed {
+			}
+			if changed {
+				if _, err := calculateAndCheckRuleHash(state, target); err != nil {
+					return err
+				}
 				target.SetState(core.Built)
-				state.LogBuildResult(tid, target, core.TargetBuilt, "Built")
+				state.LogBuildResult(target, core.TargetBuilt, "Built")
 			} else {
 				target.SetState(core.Unchanged)
-				state.LogBuildResult(tid, target, core.TargetCached, "Unchanged")
+				state.LogBuildResult(target, core.TargetCached, "Unchanged")
 			}
 			buildLinks(state, target)
 			return nil
@@ -291,29 +288,29 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 					addOutDirOutsFromMetadata(target, metadata)
 					if target.PostBuildFunction != nil && !haveRunPostBuildFunction {
 						postBuildOutput = string(metadata.Stdout)
-						if err := runPostBuildFunction(tid, state, target, postBuildOutput, ""); err != nil {
+						if err := runPostBuildFunction(state, target, postBuildOutput, ""); err != nil {
 							return err
 						}
 					}
 					// Now that we've updated the rule, retrieve the artifacts with the new output hash
-					if retrieveArtifacts(tid, state, target, oldOutputHash) {
+					if retrieveArtifacts(state, target, oldOutputHash) {
 						return writeRuleHash(state, target)
 					}
 				}
-			} else if retrieveArtifacts(tid, state, target, oldOutputHash) {
+			} else if retrieveArtifacts(state, target, oldOutputHash) {
 				return nil
 			}
 		}
 		if err := target.CheckSecrets(); err != nil {
 			return err
 		}
-		state.LogBuildResult(tid, target, core.TargetBuilding, "Preparing...")
+		state.LogBuildResult(target, core.TargetBuilding, "Preparing...")
 		if err := prepareSources(state, state.Graph, target); err != nil {
 			return fmt.Errorf("Error preparing sources for %s: %s", target.Label, err)
 		}
 
-		state.LogBuildResult(tid, target, core.TargetBuilding, target.BuildingDescription)
-		metadata, err = buildMaybeRemotely(state, target, cacheKey)
+		state.LogBuildResult(target, core.TargetBuilding, target.BuildingDescription)
+		metadata, err = build(state, target, cacheKey)
 		if err != nil {
 			return err
 		}
@@ -333,14 +330,14 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 
 	if target.PostBuildFunction != nil {
 		outs := target.Outputs()
-		if err := runPostBuildFunction(tid, state, target, string(metadata.Stdout), postBuildOutput); err != nil {
+		if err := runPostBuildFunction(state, target, string(metadata.Stdout), postBuildOutput); err != nil {
 			return err
 		}
 
 		if runRemotely && len(outs) != len(target.Outputs()) {
 			// postBuildFunction has changed the target - must rebuild it
 			log.Info("Rebuilding %s after post-build function", target)
-			metadata, err = state.RemoteClient.Build(tid, target)
+			metadata, err = state.RemoteClient.Build(target)
 			if err != nil {
 				return err
 			}
@@ -352,10 +349,10 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 	if runRemotely {
 		if metadata.Cached {
 			target.SetState(core.ReusedRemotely)
-			state.LogBuildResult(tid, target, core.TargetBuilt, "Reused existing action")
+			state.LogBuildResult(target, core.TargetBuilt, "Reused existing action")
 		} else {
 			target.SetState(core.BuiltRemotely)
-			state.LogBuildResult(tid, target, core.TargetBuilt, "Built remotely")
+			state.LogBuildResult(target, core.TargetBuilt, "Built remotely")
 		}
 		if state.ShouldDownload(target) {
 			if err := state.EnsureDownloaded(target); err != nil {
@@ -368,7 +365,7 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 		return fmt.Errorf("failed to store target build metadata for %s: %w", target.Label, err)
 	}
 
-	state.LogBuildResult(tid, target, core.TargetBuilding, "Collecting outputs...")
+	state.LogBuildResult(target, core.TargetBuilding, "Collecting outputs...")
 	outs, outputsChanged, err := moveOutputs(state, target)
 	if err != nil {
 		return fmt.Errorf("error moving outputs for target %s: %w", target.Label, err)
@@ -383,7 +380,7 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 	}
 	buildLinks(state, target)
 	if state.Cache != nil {
-		state.LogBuildResult(tid, target, core.TargetBuilding, "Storing...")
+		state.LogBuildResult(target, core.TargetBuilding, "Storing...")
 		newCacheKey := mustShortTargetHash(state, target)
 
 		// If the build could modify the target, store the metadata in the cache based on the original state of the
@@ -405,9 +402,9 @@ func buildTarget(tid int, state *core.BuildState, target *core.BuildTarget, runR
 		}
 	}
 	if outputsChanged {
-		state.LogBuildResult(tid, target, core.TargetBuilt, "Built")
+		state.LogBuildResult(target, core.TargetBuilt, "Built")
 	} else {
-		state.LogBuildResult(tid, target, core.TargetBuilt, "Built (unchanged)")
+		state.LogBuildResult(target, core.TargetBuilt, "Built (unchanged)")
 	}
 	return nil
 }
@@ -450,16 +447,16 @@ func storeInCache(cache core.Cache, target *core.BuildTarget, key []byte, files 
 //  1. if there are no declared outputs, return true; there's nothing to be done
 //  2. pull all the declared outputs from the cache has based on the short hash of the target
 //  3. check that pulling the artifacts changed the output hash and set the build state accordingly
-func retrieveArtifacts(tid int, state *core.BuildState, target *core.BuildTarget, oldOutputHash []byte) bool {
+func retrieveArtifacts(state *core.BuildState, target *core.BuildTarget, oldOutputHash []byte) bool {
 	// If there aren't any outputs, we don't have to do anything right now.
 	// Checks later will handle the case of something with a post-build function that
 	// later tries to add more outputs.
 	if len(target.DeclaredOutputs()) == 0 && len(target.DeclaredNamedOutputs()) == 0 {
 		target.SetState(core.Unchanged)
-		state.LogBuildResult(tid, target, core.TargetCached, "Nothing to do")
+		state.LogBuildResult(target, core.TargetCached, "Nothing to do")
 		return true
 	}
-	state.LogBuildResult(tid, target, core.TargetBuilding, "Checking cache...")
+	state.LogBuildResult(target, core.TargetBuilding, "Checking cache...")
 
 	cacheKey := mustShortTargetHash(state, target)
 
@@ -478,10 +475,10 @@ func retrieveArtifacts(tid int, state *core.BuildState, target *core.BuildTarget
 			return false
 		} else if oldOutputHash == nil || !bytes.Equal(oldOutputHash, newOutputHash) {
 			target.SetState(core.Cached)
-			state.LogBuildResult(tid, target, core.TargetCached, "Cached")
+			state.LogBuildResult(target, core.TargetCached, "Cached")
 		} else {
 			target.SetState(core.Unchanged)
-			state.LogBuildResult(tid, target, core.TargetCached, "Cached (unchanged)")
+			state.LogBuildResult(target, core.TargetCached, "Cached (unchanged)")
 		}
 		buildLinks(state, target)
 
@@ -509,7 +506,7 @@ func runBuildCommand(state *core.BuildState, target *core.BuildTarget, command s
 	if target.IsTextFile {
 		return nil, buildTextFile(state, target)
 	}
-	env := core.StampedBuildEnvironment(state, target, inputHash, path.Join(core.RepoRoot, target.TmpDir()), target.Stamp)
+	env := core.StampedBuildEnvironment(state, target, inputHash, filepath.Join(core.RepoRoot, target.TmpDir()), target.Stamp)
 	log.Debug("Building target %s\nENVIRONMENT:\n%s\n%s", target.Label, env, command)
 	out, combined, err := state.ProcessExecutor.ExecWithTimeoutShell(target, target.TmpDir(), env, target.BuildTimeout, state.ShowAllOutput, false, process.NewSandboxConfig(target.Sandbox, target.Sandbox), command)
 	if err != nil {
@@ -553,8 +550,8 @@ func prepareOutputDirectories(target *core.BuildTarget) error {
 // prepareParentDirs will create any parent directories of an output i.e. for the output foo/bar/baz it will create
 // foo and foo/bar
 func prepareParentDirs(target *core.BuildTarget, out string) error {
-	if dir := path.Dir(out); dir != "." {
-		outPath := path.Join(target.TmpDir(), dir)
+	if dir := filepath.Dir(out); dir != "." {
+		outPath := filepath.Join(target.TmpDir(), dir)
 		if !core.PathExists(outPath) {
 			if err := os.MkdirAll(outPath, core.DirPermissions); err != nil {
 				return err
@@ -596,7 +593,7 @@ func prepareSources(state *core.BuildState, graph *core.BuildGraph, target *core
 		}
 	}
 	if target.Stamp {
-		if err := fs.WriteFile(bytes.NewReader(core.StampFile(target)), path.Join(target.TmpDir(), target.StampFileName()), 0644); err != nil {
+		if err := fs.WriteFile(bytes.NewReader(core.StampFile(state.Config, target)), filepath.Join(target.TmpDir(), target.StampFileName()), 0644); err != nil {
 			return err
 		}
 	}
@@ -662,7 +659,7 @@ func copyOutDir(target *core.BuildTarget, from string, to string) ([]string, err
 	}
 	if info.IsDir() {
 		err := fs.Walk(from, func(name string, isDir bool) error {
-			dest := path.Join(to, name[len(from):])
+			dest := filepath.Join(to, name[len(from):])
 			if isDir {
 				return os.MkdirAll(dest, fs.DirPermissions)
 			}
@@ -688,8 +685,8 @@ func moveOutputs(state *core.BuildState, target *core.BuildTarget) ([]string, bo
 	allOuts := make([]string, len(outs), len(outs)+len(target.OutputDirectories))
 	for i, output := range outs {
 		allOuts[i] = output
-		tmpOutput := path.Join(tmpDir, target.GetTmpOutput(output))
-		realOutput := path.Join(outDir, output)
+		tmpOutput := filepath.Join(tmpDir, target.GetTmpOutput(output))
+		realOutput := filepath.Join(outDir, output)
 		if !core.PathExists(tmpOutput) {
 			return nil, true, fmt.Errorf("rule %s failed to create output %s", target.Label, tmpOutput)
 		}
@@ -713,8 +710,8 @@ func moveOutputs(state *core.BuildState, target *core.BuildTarget) ([]string, bo
 	// Glob patterns are supported on these.
 	for _, output := range fs.Glob(state.Config.Parse.BuildFileName, tmpDir, target.OptionalOutputs, nil, true) {
 		log.Debug("Discovered optional output %s", output)
-		tmpOutput := path.Join(tmpDir, output)
-		realOutput := path.Join(outDir, output)
+		tmpOutput := filepath.Join(tmpDir, output)
+		realOutput := filepath.Join(outDir, output)
 		if _, err := moveOutput(state, target, tmpOutput, realOutput); err != nil {
 			return nil, changed, err
 		}
@@ -741,9 +738,9 @@ func moveOutput(state *core.BuildState, target *core.BuildTarget, tmpOutput, rea
 			return true, err
 		}
 	}
-	state.PathHasher.MoveHash(tmpOutput, realOutput, false)
+	state.PathHasher.MoveHash(tmpOutput, realOutput)
 	// Check if we need a directory for this output.
-	dir := path.Dir(realOutput)
+	dir := filepath.Dir(realOutput)
 	if !core.PathExists(dir) {
 		if err := os.MkdirAll(dir, core.DirPermissions); err != nil {
 			return true, err
@@ -766,7 +763,7 @@ func moveOutput(state *core.BuildState, target *core.BuildTarget, tmpOutput, rea
 // RemoveOutputs removes all generated outputs for a rule.
 func RemoveOutputs(target *core.BuildTarget) error {
 	for _, output := range target.Outputs() {
-		out := path.Join(target.OutDir(), output)
+		out := filepath.Join(target.OutDir(), output)
 		if err := os.RemoveAll(out); err != nil {
 			return err
 		} else if err := fs.EnsureDir(out); err != nil {
@@ -782,7 +779,7 @@ func RemoveOutputs(target *core.BuildTarget) error {
 // It returns true if something was removed.
 func checkForStaleOutput(filename string, err error) bool {
 	if perr, ok := err.(*os.PathError); ok && perr.Err.Error() == "not a directory" {
-		for dir := filename; dir != "." && dir != "/" && path.Base(dir) != "plz-out"; dir = path.Dir(dir) {
+		for dir := filename; dir != "." && dir != "/" && filepath.Base(dir) != "plz-out"; dir = filepath.Dir(dir) {
 			if fs.FileExists(dir) {
 				log.Warning("Removing %s which appears to be a stale output file", dir)
 				os.Remove(dir)
@@ -854,6 +851,7 @@ func (h *targetHasher) OutputHash(target *core.BuildTarget) ([]byte, error) {
 	h.mutex.RLock()
 	hash, present := h.hashes[target]
 	h.mutex.RUnlock()
+
 	if present {
 		return hash, nil
 	}
@@ -875,13 +873,7 @@ func (h *targetHasher) SetHash(target *core.BuildTarget, hash []byte) {
 // outputHash calculates the output hash for a target, choosing an appropriate strategy.
 func (h *targetHasher) outputHash(target *core.BuildTarget) ([]byte, error) {
 	outs := target.FullOutputs()
-
-	// We must combine for sha1 for backwards compatibility
-	// TODO(jpoole): remove this special case in v16
-	mustCombine := h.State.Config.Build.HashFunction == "sha1" && !h.State.Config.FeatureFlags.SingleSHA1Hash
-	combine := len(outs) != 1 || mustCombine
-
-	if !combine && fs.FileExists(outs[0]) {
+	if len(outs) == 1 && fs.FileExists(outs[0]) {
 		return outputHash(target, outs, h.State.PathHasher, nil)
 	}
 	return outputHash(target, outs, h.State.PathHasher, h.State.PathHasher.NewHash)
@@ -915,7 +907,7 @@ func outputHash(target *core.BuildTarget, outputs []string, hasher *fs.PathHashe
 	return h.Sum(nil), nil
 }
 
-// Verify the hash of output files for a rule match the ones set on it.
+// checkRuleHashes verifies the hash of output files for a rule match the ones set on it.
 func checkRuleHashes(state *core.BuildState, target *core.BuildTarget, hash []byte) error {
 	if len(target.Hashes) == 0 {
 		return nil // nothing to check
@@ -934,14 +926,6 @@ func checkRuleHashes(state *core.BuildState, target *core.BuildTarget, hash []by
 	validHashes, valid := checkRuleHashesOfType(target, hashes, outputs, state.OutputHashCheckers(), combine)
 	if valid {
 		return nil
-	}
-
-	// TODO(jpoole): remove this special case for sha1 once v16 is released
-	if !state.Config.FeatureFlags.SingleSHA1Hash {
-		// Always allow both the combined and non-combined sha1 hash for backwards compatibility
-		if _, valid := checkRuleHashesOfType(target, hashes, outputs, []*fs.PathHasher{state.Hasher("sha1")}, !combine); valid {
-			return nil
-		}
 	}
 	if len(target.Hashes) == 1 {
 		return fmt.Errorf("Bad output hash for rule %s, expected %s, but was: \n\t%s",
@@ -984,7 +968,7 @@ func checkRuleHashesOfType(target *core.BuildTarget, hashes, outputs []string, h
 // In some cases it may have already run; if so we compare the previous output and warn
 // if the two differ (they must be deterministic to ensure it's a pure function, since there
 // are a few different paths through here and we guarantee to only run them once).
-func runPostBuildFunction(tid int, state *core.BuildState, target *core.BuildTarget, output, prevOutput string) error {
+func runPostBuildFunction(state *core.BuildState, target *core.BuildTarget, output, prevOutput string) error {
 	if prevOutput != "" {
 		if output != prevOutput {
 			log.Warning("The build output for %s differs from what we got back from the cache earlier.\n"+
@@ -995,27 +979,14 @@ func runPostBuildFunction(tid int, state *core.BuildState, target *core.BuildTar
 		}
 		return nil
 	}
-	return state.Parser.RunPostBuildFunction(tid, state, target, output)
+	return state.Parser.RunPostBuildFunction(state, target, output)
 }
 
 // checkLicences checks the licences for the target match what we've accepted / rejected in the config
 // and panics if they don't match.
 func checkLicences(state *core.BuildState, target *core.BuildTarget) {
-	for _, licence := range target.Licences {
-		for _, reject := range state.Config.Licences.Reject {
-			if strings.EqualFold(reject, licence) {
-				panic(fmt.Sprintf("Target %s is licensed %s, which is explicitly rejected for this repository", target.Label, licence))
-			}
-		}
-		for _, accept := range state.Config.Licences.Accept {
-			if strings.EqualFold(accept, licence) {
-				log.Info("Licence %s is accepted in this repository", licence)
-				return // Note licences are assumed to be an 'or', ie. any one of them can be accepted.
-			}
-		}
-	}
-	if len(target.Licences) > 0 && len(state.Config.Licences.Accept) > 0 {
-		panic(fmt.Sprintf("None of the licences for %s are accepted in this repository: %s", target.Label, strings.Join(target.Licences, ", ")))
+	if _, err := target.CheckLicences(state.Config); err != nil {
+		panic(err)
 	}
 }
 
@@ -1038,13 +1009,13 @@ func buildLinksOfType(state *core.BuildState, target *core.BuildTarget, prefix s
 	if labels := target.PrefixedLabels(prefix); len(labels) > 0 {
 		env := core.TargetEnvironment(state, target)
 		for _, dest := range labels {
-			destDir := path.Join(core.RepoRoot, os.Expand(dest, env.ReplaceEnvironment))
-			srcDir := path.Join(core.RepoRoot, target.OutDir())
+			destDir := filepath.Join(core.RepoRoot, os.Expand(dest, env.ReplaceEnvironment))
+			srcDir := filepath.Join(core.RepoRoot, target.OutDir())
 			for _, out := range target.Outputs() {
 				if direct {
-					fs.LinkDestination(path.Join(srcDir, out), destDir, f)
+					fs.LinkDestination(filepath.Join(srcDir, out), destDir, f)
 				} else {
-					fs.LinkIfNotExists(path.Join(srcDir, out), path.Join(destDir, out), f)
+					fs.LinkIfNotExists(filepath.Join(srcDir, out), filepath.Join(destDir, out), f)
 				}
 			}
 		}
@@ -1088,9 +1059,9 @@ func fetchOneRemoteFile(state *core.BuildState, target *core.BuildTarget, url st
 	httpClientLimiter <- struct{}{}
 	defer func() { <-httpClientLimiter }()
 
-	env := core.BuildEnvironment(state, target, path.Join(core.RepoRoot, target.TmpDir()))
+	env := core.BuildEnvironment(state, target, filepath.Join(core.RepoRoot, target.TmpDir()))
 	url = os.Expand(url, env.ReplaceEnvironment)
-	tmpPath := path.Join(target.TmpDir(), target.Outputs()[0])
+	tmpPath := filepath.Join(target.TmpDir(), target.Outputs()[0])
 	f, err := os.Create(tmpPath)
 	if err != nil {
 		return err
@@ -1098,7 +1069,7 @@ func fetchOneRemoteFile(state *core.BuildState, target *core.BuildTarget, url st
 	defer f.Close()
 	if strings.HasPrefix(url, "file://") {
 		filename := strings.TrimPrefix(url, "file://")
-		if !path.IsAbs(filename) {
+		if !filepath.IsAbs(filename) {
 			return fmt.Errorf("URL %s must be an absolute path", url)
 		} else if strings.HasPrefix(filename, core.RepoRoot) {
 			return fmt.Errorf("URL %s is within the repo, you cannot use remote_file for this", url)
@@ -1226,57 +1197,16 @@ func (r *progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// buildMaybeRemotely builds a target, either sending it to a remote worker if needed,
-// or locally if not.
-func buildMaybeRemotely(state *core.BuildState, target *core.BuildTarget, inputHash []byte) (*core.BuildMetadata, error) {
+// build builds a target locally, it errors if a remote worker is needed since this has beeen removed.
+func build(state *core.BuildState, target *core.BuildTarget, inputHash []byte) (*core.BuildMetadata, error) {
 	metadata := new(core.BuildMetadata)
 
-	workerCmd, workerArgs, localCmd, err := core.WorkerCommandAndArgs(state, target)
+	workerCmd, _, localCmd, err := core.WorkerCommandAndArgs(state, target)
 	if err != nil {
 		return nil, err
 	} else if workerCmd == "" {
 		metadata.Stdout, err = runBuildCommand(state, target, localCmd, inputHash)
 		return metadata, err
 	}
-	// The scheme here is pretty minimal; remote workers currently have quite a bit less info than
-	// local ones get. Over time we'll probably evolve it to add more information.
-	opts, err := shlex.Split(workerArgs)
-	if err != nil {
-		return nil, err
-	}
-	log.Debug("Sending remote build request for %s to %s; opts %s", target.Label, workerCmd, workerArgs)
-
-	// Allow callers to specify only a subset of sources to send to the worker
-	// If they don't do this, send all sources.
-
-	var workerSources []string
-	workerSourceInputs, present := target.NamedSources[magicSourcesWorkerKey]
-	if !present {
-		workerSources = target.AllSourcePaths(state.Graph)
-	} else {
-		workerSources = target.SourcePaths(state.Graph, workerSourceInputs)
-	}
-
-	resp, err := worker.BuildRemotely(state, target, workerCmd, &worker.Request{
-		Rule:    target.Label.String(),
-		Labels:  target.Labels,
-		TempDir: path.Join(core.RepoRoot, target.TmpDir()),
-		Sources: workerSources,
-		Options: opts,
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := strings.Join(resp.Messages, "\n")
-	if !resp.Success {
-		return nil, fmt.Errorf("Error building target %s: %s", target.Label, out)
-	}
-	// Okay, now we might need to do something locally too...
-	if localCmd != "" {
-		out2, err := runBuildCommand(state, target, localCmd, inputHash)
-		metadata.Stdout = append([]byte(out+"\n"), out2...)
-		return metadata, err
-	}
-	metadata.Stdout = []byte(out)
-	return metadata, nil
+	return nil, fmt.Errorf("Persistent workers are no longer supported, found worker command: %s", workerCmd)
 }

@@ -3,7 +3,6 @@ package core
 import (
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -248,7 +247,8 @@ type BuildMetadata struct {
 	// Standard output & error
 	Stdout, Stderr []byte
 	// Serialised build action metadata.
-	RemoteAction []byte
+	RemoteAction  []byte
+	RemoteOutputs []byte
 	// Time this action was written. Used for remote execution to determine if
 	// the action is stale and needs re-checking or not.
 	Timestamp time.Time
@@ -378,7 +378,7 @@ func (target *BuildTarget) String() string {
 // to attempt to keep rules from duplicating the names of sub-packages; obviously that is not
 // 100% reliable but we don't have a better solution right now.
 func (target *BuildTarget) TmpDir() string {
-	return path.Join(TmpDir, target.Label.Subrepo, target.Label.PackageName, target.Label.Name+buildDirSuffix)
+	return filepath.Join(TmpDir, target.Label.Subrepo, target.Label.PackageName, target.Label.Name+buildDirSuffix)
 }
 
 // BuildLockFile returns the lock filename for the target's build stage.
@@ -390,17 +390,17 @@ func (target *BuildTarget) BuildLockFile() string {
 // //mickey/donald:goofy -> plz-out/gen/mickey/donald (or plz-out/bin if it's a binary)
 func (target *BuildTarget) OutDir() string {
 	if target.IsSubrepo {
-		return path.Join(SubrepoDir, target.Label.Subrepo, target.Label.PackageName)
+		return filepath.Join(SubrepoDir, target.Label.Subrepo, target.Label.PackageName)
 	} else if target.IsBinary {
-		return path.Join(BinDir, target.Label.Subrepo, target.Label.PackageName)
+		return filepath.Join(BinDir, target.Label.Subrepo, target.Label.PackageName)
 	}
-	return path.Join(GenDir, target.Label.Subrepo, target.Label.PackageName)
+	return filepath.Join(GenDir, target.Label.Subrepo, target.Label.PackageName)
 }
 
 // ExecDir returns the exec directory for this target, e.g.
 // //mickey/donald:goofy -> plz-out/exec/mickey/donald/goofy
 func (target *BuildTarget) ExecDir() string {
-	return path.Join(ExecDir, target.Label.Subrepo, target.Label.PackageName, target.Label.Name)
+	return filepath.Join(ExecDir, target.Label.Subrepo, target.Label.PackageName, target.Label.Name)
 }
 
 // TestDir returns the test directory for this target, eg.
@@ -408,7 +408,7 @@ func (target *BuildTarget) ExecDir() string {
 // This is different to TmpDir so we run tests in a clean environment
 // and to facilitate containerising tests.
 func (target *BuildTarget) TestDir(runNumber int) string {
-	return path.Join(target.TestDirs(), fmt.Sprint("run_", runNumber))
+	return filepath.Join(target.TestDirs(), fmt.Sprint("run_", runNumber))
 }
 
 // TestLockFile returns the lock filename for the target's test stage.
@@ -418,7 +418,7 @@ func (target *BuildTarget) TestLockFile(runNumber int) string {
 
 // TestDirs contains the parent directory of all the test run directories above
 func (target *BuildTarget) TestDirs() string {
-	return path.Join(TmpDir, target.Label.Subrepo, target.Label.PackageName, target.Label.Name+testDirSuffix)
+	return filepath.Join(TmpDir, target.Label.Subrepo, target.Label.PackageName, target.Label.Name+testDirSuffix)
 }
 
 // IsTest returns whether or not the target is a test target i.e. has its Test field populated
@@ -437,12 +437,12 @@ func (target *BuildTarget) CompleteRun(state *BuildState) bool {
 
 // TestResultsFile returns the output results file for tests for this target.
 func (target *BuildTarget) TestResultsFile() string {
-	return path.Join(target.OutDir(), ".test_results_"+target.Label.Name)
+	return filepath.Join(target.OutDir(), ".test_results_"+target.Label.Name)
 }
 
 // CoverageFile returns the output coverage file for tests for this target.
 func (target *BuildTarget) CoverageFile() string {
-	return path.Join(target.OutDir(), ".test_coverage_"+target.Label.Name)
+	return filepath.Join(target.OutDir(), ".test_coverage_"+target.Label.Name)
 }
 
 // AddTestResults adds results to the target
@@ -514,7 +514,8 @@ func (target *BuildTarget) AllURLs(state *BuildState) []string {
 
 // resolveDependencies matches up all declared dependencies to the actual build targets.
 // TODO(peterebden,tatskaari): Work out if we really want to have this and how the suite of *Dependencies functions
-//                             below should behave (preferably nicely).
+//
+//	below should behave (preferably nicely).
 func (target *BuildTarget) resolveDependencies(graph *BuildGraph, callback func(*BuildTarget) error) error {
 	var g errgroup.Group
 	target.mutex.RLock()
@@ -639,12 +640,12 @@ func (target *BuildTarget) ExternalDependencies() []*BuildTarget {
 }
 
 // BuildDependencies returns the build-time dependencies of this target (i.e. not data, internal nor source).
-func (target *BuildTarget) BuildDependencies(state *BuildState) []*BuildTarget {
+func (target *BuildTarget) BuildDependencies() []*BuildTarget {
 	target.mutex.RLock()
 	defer target.mutex.RUnlock()
 	ret := make(BuildTargets, 0, len(target.dependencies))
 	for _, deps := range target.dependencies {
-		if !deps.data && !deps.internal && (!state.Config.FeatureFlags.NoIterSourcesMarked || !deps.source) {
+		if !deps.data && !deps.internal && !deps.source {
 			for _, dep := range deps.deps {
 				ret = append(ret, dep)
 			}
@@ -717,26 +718,54 @@ func (target *BuildTarget) DeclaredOutputNames() []string {
 	return ret
 }
 
+// DeclaredNamedSources returns the named sources from this target's original declaration.
+func (target *BuildTarget) DeclaredNamedSources() map[string][]string {
+	ret := make(map[string][]string, len(target.NamedSources))
+	for k, v := range target.NamedSources {
+		ret[k] = make([]string, len(v))
+		for i, bi := range v {
+			ret[k][i] = bi.String()
+		}
+	}
+	return ret
+}
+
+// DeclaredSourceNames is a convenience function to return the names of the declared
+// sources in a consistent order.
+func (target *BuildTarget) DeclaredSourceNames() []string {
+	ret := make([]string, 0, len(target.NamedSources))
+	for name := range target.NamedSources {
+		ret = append(ret, name)
+	}
+	sort.Strings(ret)
+	return ret
+}
+
+func (target *BuildTarget) filegroupOutputs(srcs []BuildInput) []string {
+	ret := make([]string, 0, len(srcs))
+	// Filegroups just re-output their inputs.
+	for _, src := range srcs {
+		if namedLabel, ok := src.(AnnotatedOutputLabel); ok {
+			// Bit of a hack, but this needs different treatment from either of the others.
+			for _, dep := range target.DependenciesFor(namedLabel.BuildLabel) {
+				ret = append(ret, dep.NamedOutputs(namedLabel.Annotation)...)
+			}
+		} else if label, ok := src.nonOutputLabel(); !ok {
+			ret = append(ret, src.LocalPaths(nil)[0])
+		} else {
+			for _, dep := range target.DependenciesFor(label) {
+				ret = append(ret, dep.Outputs()...)
+			}
+		}
+	}
+	return ret
+}
+
 // Outputs returns a slice of all the outputs of this rule.
 func (target *BuildTarget) Outputs() []string {
 	var ret []string
 	if target.IsFilegroup {
-		ret = make([]string, 0, len(target.Sources))
-		// Filegroups just re-output their inputs.
-		for _, src := range target.Sources {
-			if namedLabel, ok := src.(AnnotatedOutputLabel); ok {
-				// Bit of a hack, but this needs different treatment from either of the others.
-				for _, dep := range target.DependenciesFor(namedLabel.BuildLabel) {
-					ret = append(ret, dep.NamedOutputs(namedLabel.Annotation)...)
-				}
-			} else if label, ok := src.nonOutputLabel(); !ok {
-				ret = append(ret, src.LocalPaths(nil)[0])
-			} else {
-				for _, dep := range target.DependenciesFor(label) {
-					ret = append(ret, dep.Outputs()...)
-				}
-			}
-		}
+		ret = target.filegroupOutputs(target.AllSources())
 	} else {
 		// Must really copy the slice before sorting it ([:] is too shallow)
 		ret = make([]string, len(target.outputs))
@@ -756,7 +785,7 @@ func (target *BuildTarget) FullOutputs() []string {
 	outs := target.Outputs()
 	outDir := target.OutDir()
 	for i, out := range outs {
-		outs[i] = path.Join(outDir, out)
+		outs[i] = filepath.Join(outDir, out)
 	}
 	return outs
 }
@@ -777,6 +806,15 @@ func (target *BuildTarget) AllOutputs() []string {
 // NamedOutputs returns a slice of all the outputs of this rule with a given name.
 // If the name is not declared by this rule it panics.
 func (target *BuildTarget) NamedOutputs(name string) []string {
+	if target.IsFilegroup {
+		if target.NamedSources == nil {
+			return nil
+		}
+		if srcs, present := target.NamedSources[name]; present {
+			return target.filegroupOutputs(srcs)
+		}
+		return nil
+	}
 	if target.namedOutputs == nil {
 		return nil
 	}
@@ -1055,11 +1093,22 @@ func (target *BuildTarget) AddLabel(label string) {
 // HasLabel returns true if target has the given label.
 func (target *BuildTarget) HasLabel(label string) bool {
 	for _, l := range target.Labels {
-		if l == label {
+		if match(label, l) {
 			return true
 		}
 	}
 	return label == "test" && target.IsTest()
+}
+
+// match returns true if the given label matches the given pattern.
+func match(pattern, s string) bool {
+	if pattern == s {
+		return true
+	}
+	if strings.HasSuffix(pattern, "*") && strings.HasPrefix(s, pattern[:len(pattern)-1]) {
+		return true
+	}
+	return false
 }
 
 // PrefixedLabels returns all labels of this target with the given prefix.
@@ -1125,6 +1174,9 @@ func (target *BuildTarget) AddProvide(language string, label BuildLabel) {
 		target.Provides = map[string]BuildLabel{language: label}
 	} else {
 		target.Provides[language] = label
+	}
+	if label != target.Label {
+		target.AddDependency(label)
 	}
 }
 
@@ -1604,9 +1656,9 @@ func (target *BuildTarget) toolPath(abs bool, namedOutput string) string {
 		ret := make([]string, len(outputs))
 		for i, o := range outputs {
 			if abs {
-				ret[i] = path.Join(RepoRoot, target.OutDir(), o)
+				ret[i] = filepath.Join(RepoRoot, target.OutDir(), o)
 			} else {
-				ret[i] = path.Join(target.Label.PackageName, o)
+				ret[i] = filepath.Join(target.PackageDir(), o)
 			}
 		}
 		return strings.Join(ret, " ")
@@ -1789,6 +1841,37 @@ func (target *BuildTarget) HasLinks(state *BuildState) bool {
 		return true
 	}
 	return false
+}
+
+func (target *BuildTarget) PackageDir() string {
+	if target.Subrepo != nil {
+		return filepath.Join(target.Subrepo.PackageRoot, target.Label.PackageDir())
+	}
+	return target.Label.PackageDir()
+}
+
+// CheckLicences checks the target's licences against the accepted/rejected list.
+// It returns the licence that was accepted and an error if it did not match.
+func (target *BuildTarget) CheckLicences(config *Configuration) (string, error) {
+	if len(target.Licences) == 0 {
+		return "", nil
+	}
+	for _, licence := range target.Licences {
+		for _, reject := range config.Licences.Reject {
+			if strings.EqualFold(reject, licence) {
+				return "", fmt.Errorf("Target %s is licensed %s, which is explicitly rejected for this repository", target.Label, licence)
+			}
+		}
+		for _, accept := range config.Licences.Accept {
+			if strings.EqualFold(accept, licence) {
+				return licence, nil // Note licences are assumed to be an 'or', ie. any one of them can be accepted.
+			}
+		}
+	}
+	if len(config.Licences.Accept) > 0 {
+		return "", fmt.Errorf("None of the licences for %s are accepted in this repository: %s", target.Label, strings.Join(target.Licences, ", "))
+	}
+	return "", nil
 }
 
 // BuildTargets makes a slice of build targets sortable by their labels.

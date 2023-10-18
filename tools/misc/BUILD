@@ -20,6 +20,7 @@ python_binary(
 python_test(
     name = "gen_release_test",
     srcs = ["gen_release_test.py"],
+    data = ["data"],
     deps = [":gen_release"],
 )
 

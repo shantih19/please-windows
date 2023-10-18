@@ -1,10 +1,7 @@
-[proto]
-protoctool = protoc
-protocflag = -I/usr/include
-
 [Plugin "go"]
 DefaultStatic = true
 GoTool = go
+Stdlib = //third_party/go:std
 
 [buildconfig]
 static-sandbox = true

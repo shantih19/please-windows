@@ -34,7 +34,7 @@ func parseFileToStatementsInPkg(filename string, pkg *core.Package) (*scope, []*
 	}
 	statements = parser.optimise(statements)
 	parser.interpreter.optimiseExpressions(statements)
-	s, err := parser.interpreter.interpretAll(pkg, statements)
+	s, err := parser.interpreter.interpretAll(pkg, nil, nil, 0, statements)
 	return s, statements, err
 }
 
@@ -165,6 +165,48 @@ func TestInterpreterSorting(t *testing.T) {
 	// N.B. sorted() sorts in-place, unlike Python's one. We may change that later.
 }
 
+func TestReversed(t *testing.T) {
+	s, err := parseFile("src/parse/asp/test_data/interpreter/reversed.build")
+	require.NoError(t, err)
+	assert.Equal(t, pyList{}, s.Lookup("r1"))
+	assert.Equal(t, pyList{pyInt(3), pyInt(2), pyInt(1)}, s.Lookup("r2"))
+	assert.Equal(t, pyList{pyInt(4), pyInt(3), pyInt(2), pyInt(1)}, s.Lookup("r3"))
+}
+
+func TestFilter(t *testing.T) {
+	s, err := parseFile("src/parse/asp/test_data/interpreter/filter.build")
+	require.NoError(t, err)
+	assert.Equal(t, pyList{pyInt(1), pyInt(2), pyInt(3)}, s.Lookup("f1"))
+	assert.Equal(t, pyList{pyInt(0), pyInt(2)}, s.Lookup("f2"))
+	assert.Equal(t, pyList{pyInt(5), pyInt(5)}, s.Lookup("f3"))
+}
+
+func TestMap(t *testing.T) {
+	s, err := parseFile("src/parse/asp/test_data/interpreter/map.build")
+	require.NoError(t, err)
+	assert.Equal(t, pyList{pyInt(0), pyInt(1), pyInt(2), pyInt(3)}, s.Lookup("m1"))
+	assert.Equal(t, pyList{pyInt(1), pyInt(2), pyInt(3), pyInt(4)}, s.Lookup("m2"))
+}
+
+func TestReduce(t *testing.T) {
+	s, err := parseFile("src/parse/asp/test_data/interpreter/reduce.build")
+	require.NoError(t, err)
+	assert.Equal(t, pyInt(6), s.Lookup("r1"))
+	assert.Equal(t, pyInt(16), s.Lookup("r2"))
+	res := pyDict{
+		"a": pyInt(2),
+		"b": pyInt(3),
+		"c": pyInt(4),
+		"d": pyInt(5),
+		"e": pyInt(0),
+	}
+	assert.Equal(t, res, s.Lookup("r3"))
+	assert.Equal(t, s.Lookup("None"), s.Lookup("r4"))
+	assert.Equal(t, pyInt(5), s.Lookup("r5"))
+	assert.Equal(t, pyInt(6), s.Lookup("r6"))
+	assert.Equal(t, pyInt(7), s.Lookup("r7"))
+}
+
 func TestInterpreterUnpacking(t *testing.T) {
 	s, err := parseFile("src/parse/asp/test_data/interpreter/unpacking.build")
 	require.NoError(t, err)
@@ -286,7 +328,7 @@ func TestInterpreterFStrings(t *testing.T) {
 func TestInterpreterSubincludeConfig(t *testing.T) {
 	s, err := parseFile("src/parse/asp/test_data/interpreter/partition.build")
 	assert.NoError(t, err)
-	s.SetAll(s.interpreter.Subinclude("src/parse/asp/test_data/interpreter/subinclude_config.build", core.NewPackage("test").Label()), false)
+	s.SetAll(s.interpreter.Subinclude(s, "src/parse/asp/test_data/interpreter/subinclude_config.build", core.NewPackage("test").Label(), false), false)
 	assert.EqualValues(t, "test test", s.config.Get("test", None))
 }
 
@@ -300,6 +342,21 @@ func TestInterpreterLen(t *testing.T) {
 	s, err := parseFile("src/parse/asp/test_data/interpreter/len.build")
 	assert.NoError(t, err)
 	assert.EqualValues(t, "sync", s.Lookup("y"))
+	assert.EqualValues(t, 4, s.Lookup("l1"))
+	assert.EqualValues(t, 6, s.Lookup("l2"))
+	assert.EqualValues(t, 5, s.Lookup("l3"))
+	assert.EqualValues(t, 2, s.Lookup("l4"))
+}
+
+func TestInterpreterIndex(t *testing.T) {
+	t.Run("String indexing", func(t *testing.T) {
+		s, err := parseFile("src/parse/asp/test_data/interpreter/index_string.build")
+		assert.NoError(t, err)
+		assert.EqualValues(t, pyString("l"), s.Lookup("c1"))
+		assert.EqualValues(t, pyString("n"), s.Lookup("c2"))
+		assert.EqualValues(t, pyString("\u043d"), s.Lookup("c3"))
+		assert.EqualValues(t, pyString("\u0637"), s.Lookup("c4"))
+	})
 }
 
 func TestInterpreterFStringDollars(t *testing.T) {
@@ -389,6 +446,107 @@ func TestFormat(t *testing.T) {
 	assert.EqualValues(t, `ARCH="linux_amd64"`, s.Lookup("arch2"))
 }
 
+func TestAny(t *testing.T) {
+	t.Run("OK", func(t *testing.T) {
+		s, err := parseFile("src/parse/asp/test_data/interpreter/any.build")
+		assert.NoError(t, err)
+		for i := 1; i <= 9; i++ {
+			assert.EqualValues(t, pyBool(true), s.Lookup(fmt.Sprintf("t%d", i)))
+		}
+		for i := 1; i <= 9; i++ {
+			assert.EqualValues(t, pyBool(false), s.Lookup(fmt.Sprintf("f%d", i)))
+		}
+	})
+}
+
+func TestAll(t *testing.T) {
+	t.Run("OK", func(t *testing.T) {
+		s, err := parseFile("src/parse/asp/test_data/interpreter/all.build")
+		assert.NoError(t, err)
+		for i := 1; i <= 9; i++ {
+			assert.EqualValues(t, pyBool(true), s.Lookup(fmt.Sprintf("t%d", i)))
+		}
+		for i := 1; i <= 9; i++ {
+			assert.EqualValues(t, pyBool(false), s.Lookup(fmt.Sprintf("f%d", i)))
+		}
+	})
+}
+
+func TestMin(t *testing.T) {
+	t.Run("OK", func(t *testing.T) {
+		s, err := parseFile("src/parse/asp/test_data/interpreter/min.build")
+		assert.NoError(t, err)
+		for i := 1; i <= 3; i++ {
+			assert.EqualValues(t, pyInt(1), s.Lookup(fmt.Sprintf("i%d", i)))
+			assert.EqualValues(t, pyString("five"), s.Lookup(fmt.Sprintf("s%d", i)))
+		}
+		for i := 4; i <= 6; i++ {
+			assert.EqualValues(t, pyString("ten"), s.Lookup(fmt.Sprintf("s%d", i)))
+		}
+		assert.EqualValues(t, pyString("one"), s.Lookup("s7"))
+	})
+}
+
+func TestMax(t *testing.T) {
+	t.Run("OK", func(t *testing.T) {
+		s, err := parseFile("src/parse/asp/test_data/interpreter/max.build")
+		assert.NoError(t, err)
+		for i := 1; i <= 3; i++ {
+			assert.EqualValues(t, pyInt(5), s.Lookup(fmt.Sprintf("i%d", i)))
+			assert.EqualValues(t, pyString("two"), s.Lookup(fmt.Sprintf("s%d", i)))
+		}
+		for i := 4; i <= 6; i++ {
+			assert.EqualValues(t, pyString("three"), s.Lookup(fmt.Sprintf("s%d", i)))
+		}
+		assert.EqualValues(t, pyString("one"), s.Lookup("s7"))
+	})
+}
+
+func TestChr(t *testing.T) {
+	t.Run("OK", func(t *testing.T) {
+		s, err := parseFile("src/parse/asp/test_data/interpreter/chr.build")
+		assert.NoError(t, err)
+		assert.EqualValues(t, pyString("\x00"), s.Lookup("null"))
+		assert.EqualValues(t, pyString("a"), s.Lookup("a"))
+		assert.EqualValues(t, pyString("€"), s.Lookup("euro"))
+		assert.EqualValues(t, pyString("\U0010FFFF"), s.Lookup("maximum"))
+	})
+	t.Run("Wrong parameter type", func(t *testing.T) {
+		_, err := parseFile("src/parse/asp/test_data/interpreter/chr_wrong_type.build")
+		assert.ErrorContains(t, err, "Invalid type for argument i to chr; expected int, was str")
+	})
+	t.Run("Parameter out of bounds (too low)", func(t *testing.T) {
+		_, err := parseFile("src/parse/asp/test_data/interpreter/chr_bounds_low.build")
+		assert.ErrorContains(t, err, "Argument i must be within the Unicode code point range")
+	})
+	t.Run("Parameter out of bounds (too high)", func(t *testing.T) {
+		_, err := parseFile("src/parse/asp/test_data/interpreter/chr_bounds_high.build")
+		assert.ErrorContains(t, err, "Argument i must be within the Unicode code point range")
+	})
+}
+
+func TestOrd(t *testing.T) {
+	t.Run("OK", func(t *testing.T) {
+		s, err := parseFile("src/parse/asp/test_data/interpreter/ord.build")
+		assert.NoError(t, err)
+		assert.EqualValues(t, pyInt(97), s.Lookup("a"))
+		assert.EqualValues(t, pyInt(8364), s.Lookup("euro"))
+		assert.EqualValues(t, pyInt(8984), s.Lookup("cmd"))
+	})
+	t.Run("Wrong parameter type", func(t *testing.T) {
+		_, err := parseFile("src/parse/asp/test_data/interpreter/ord_wrong_type.build")
+		assert.ErrorContains(t, err, "Invalid type for argument c to ord; expected str, was int")
+	})
+	t.Run("Parameter too short", func(t *testing.T) {
+		_, err := parseFile("src/parse/asp/test_data/interpreter/ord_empty.build")
+		assert.ErrorContains(t, err, "Argument c must be a string containing a single Unicode character")
+	})
+	t.Run("Parameter out of bounds (too high)", func(t *testing.T) {
+		_, err := parseFile("src/parse/asp/test_data/interpreter/ord_multiple.build")
+		assert.ErrorContains(t, err, "Argument c must be a string containing a single Unicode character")
+	})
+}
+
 func TestIsSemver(t *testing.T) {
 	t.Run("OK", func(t *testing.T) {
 		s, err := parseFile("src/parse/asp/test_data/interpreter/is_semver.build")
@@ -418,7 +576,7 @@ func TestJSON(t *testing.T) {
 	statements = parser.optimise(statements)
 	parser.interpreter.optimiseExpressions(statements)
 
-	s := parser.interpreter.scope.NewScope()
+	s := parser.interpreter.scope.NewScope("BUILD", core.ParseModeNormal)
 
 	list := pyList{pyString("foo"), pyInt(5)}
 	dict := pyDict{"foo": pyString("bar")}
@@ -463,4 +621,40 @@ func TestSemverCheck(t *testing.T) {
 		_, err := parseFile("src/parse/asp/test_data/interpreter/semver_check_invalid_constraint.build")
 		assert.Error(t, err)
 	})
+}
+
+func TestLogConfigVariable(t *testing.T) {
+	state := core.NewDefaultBuildState()
+	parser := NewParser(state)
+
+	src, err := rules.ReadAsset("builtins.build_defs")
+	if err != nil {
+		panic(err)
+	}
+	parser.MustLoadBuiltins("builtins.build_defs", src)
+	statements, err := parser.parse("src/parse/asp/test_data/log_config.build")
+	if err != nil {
+		panic(err)
+	}
+	statements = parser.optimise(statements)
+	parser.interpreter.optimiseExpressions(statements)
+
+	list := pyList{pyString("foo"), pyInt(5)}
+	dict := pyDict{"foo": pyString("bar"), "baz": list}
+	confBase := &pyConfigBase{dict: dict}
+	config := &pyConfig{base: confBase, overlay: pyDict{"baz": pyInt(6)}}
+
+	s := parser.interpreter.scope.NewScope("BUILD", core.ParseModeNormal)
+	s.config = config
+	s.Set("CONFIG", config)
+
+	capturedOutput := ""
+	capture := func(format string, args ...interface{}) {
+		capturedOutput = fmt.Sprintf(format, args...)
+	}
+
+	setLogCode(s, "info", capture)
+	s.interpretStatements(statements)
+
+	assert.Equal(t, `//: {"baz": 6, "foo": bar}`, capturedOutput)
 }

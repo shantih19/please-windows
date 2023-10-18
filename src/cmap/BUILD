@@ -4,18 +4,21 @@ go_library(
         "cmap.go",
         "hash.go",
     ],
+    pgo_file = "//:pgo",
     visibility = ["PUBLIC"],
-    deps = [
-        "//third_party/go:xxhash",
-    ],
+    deps = ["///third_party/go/github.com_cespare_xxhash_v2//:v2"],
 )
 
 go_test(
     name = "cmap_test",
-    srcs = ["cmap_test.go"],
+    srcs = [
+        "cmap_test.go",
+        "hash_test.go",
+    ],
     deps = [
         ":cmap",
-        "//third_party/go:testify",
+        "///third_party/go/github.com_cespare_xxhash_v2//:v2",
+        "///third_party/go/github.com_stretchr_testify//assert",
     ],
 )
 
@@ -24,7 +27,7 @@ go_benchmark(
     srcs = ["cmap_test.go"],
     deps = [
         ":cmap",
-        "//third_party/go:testify",
+        "///third_party/go/github.com_stretchr_testify//assert",
     ],
 )
 
@@ -33,6 +36,6 @@ go_benchmark(
     srcs = ["hash_test.go"],
     deps = [
         ":cmap",
-        "//third_party/go:testify",
+        "///third_party/go/github.com_stretchr_testify//assert",
     ],
 )

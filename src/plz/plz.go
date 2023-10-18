@@ -1,7 +1,6 @@
 package plz
 
 import (
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -40,34 +39,46 @@ func Run(targets, preTargets []core.BuildLabel, state *core.BuildState, config *
 	// Start looking for the initial targets to kick the build off
 	go findOriginalTasks(state, preTargets, targets, arch)
 
-	parses, actions, remoteActions := state.TaskQueues()
+	parses, actions := state.TaskQueues()
+
+	localLimiter := make(limiter, config.Please.NumThreads)
+	remoteLimiter := make(limiter, config.NumRemoteExecutors())
+	anyRemote := config.NumRemoteExecutors() > 0
 
 	// Start up all the build workers
 	var wg sync.WaitGroup
-	wg.Add(1 + config.Please.NumThreads + config.NumRemoteExecutors())
+	wg.Add(2)
 	go func() {
-		// All parses happen async on separate goroutines so we don't have to worry about them blocking.
-		// They manage concurrency control themselves.
 		for task := range parses {
 			go func(task core.ParseTask) {
-				parse.Parse(0, state, task.Label, task.Dependent, task.ForSubinclude)
+				parse.Parse(state, task.Label, task.Dependent, task.Mode)
 				state.TaskDone()
 			}(task)
 		}
 		wg.Done()
 	}()
-	for i := 0; i < config.Please.NumThreads; i++ {
-		go func(tid int) {
-			doTasks(tid, state, actions, false)
-			wg.Done()
-		}(i)
-	}
-	for i := 0; i < config.NumRemoteExecutors(); i++ {
-		go func(tid int) {
-			doTasks(tid, state, remoteActions, true)
-			wg.Done()
-		}(config.Please.NumThreads + i)
-	}
+	go func() {
+		for task := range actions {
+			go func(task core.Task) {
+				remote := anyRemote && !task.Target.Local
+				if remote {
+					remoteLimiter.Acquire()
+					defer remoteLimiter.Release()
+				} else {
+					localLimiter.Acquire()
+					defer localLimiter.Release()
+				}
+				switch task.Type {
+				case core.TestTask:
+					test.Test(state, task.Target, remote, int(task.Run))
+				case core.BuildTask:
+					build.Build(state, task.Target, remote)
+				}
+				state.TaskDone()
+			}(task)
+		}
+		wg.Done()
+	}()
 	// Wait until they've all exited, which they'll do once they have no tasks left.
 	wg.Wait()
 	if state.Cache != nil {
@@ -87,26 +98,14 @@ func RunHost(targets []core.BuildLabel, state *core.BuildState) {
 	Run(targets, nil, state, state.Config, cli.HostArch())
 }
 
-func doTasks(tid int, state *core.BuildState, actions <-chan core.Task, remote bool) {
-	for task := range actions {
-		switch task.Type {
-		case core.TestTask:
-			test.Test(tid, state, task.Label, remote, int(task.Run))
-		case core.BuildTask:
-			build.Build(tid, state, task.Label, remote)
-		}
-		state.TaskDone()
-	}
-}
-
 // findOriginalTasks finds the original parse tasks for the original set of targets.
 func findOriginalTasks(state *core.BuildState, preTargets, targets []core.BuildLabel, arch cli.Arch) {
 	if state.Config.Bazel.Compatibility && fs.FileExists("WORKSPACE") {
 		// We have to parse the WORKSPACE file before anything else to understand subrepos.
 		// This is a bit crap really since it inhibits parallelism for the first step.
-		parse.Parse(0, state, core.NewBuildLabel("workspace", "all"), core.OriginalTarget, false)
+		parse.Parse(state, core.NewBuildLabel("workspace", "all"), core.OriginalTarget, core.ParseModeNormal)
 	}
-	if arch.Arch != "" {
+	if arch.Arch != "" && arch != cli.HostArch() {
 		// Set up a new subrepo for this architecture.
 		state.Graph.AddSubrepo(core.SubrepoForArch(state, arch))
 	}
@@ -136,23 +135,47 @@ func findOriginalTaskSet(state *core.BuildState, targets []core.BuildLabel, addT
 	}
 }
 
+func stripHostRepoName(config *core.Configuration, label core.BuildLabel) core.BuildLabel {
+	if label.Subrepo == "" {
+		return label
+	}
+
+	if label.Subrepo == config.PluginDefinition.Name {
+		label.Subrepo = ""
+		return label
+	}
+	label.Subrepo = strings.TrimPrefix(label.Subrepo, config.PluginDefinition.Name+"_")
+
+	hostArch := cli.HostArch()
+	if label.Subrepo == hostArch.String() {
+		label.Subrepo = ""
+	}
+	label.Subrepo = strings.TrimSuffix(label.Subrepo, "_"+hostArch.String())
+
+	return label
+}
+
 func findOriginalTask(state *core.BuildState, target core.BuildLabel, addToList bool, arch cli.Arch) {
 	if arch != cli.HostArch() {
-		target.Subrepo = arch.String()
+		target = core.LabelToArch(target, arch)
 	}
+	target = stripHostRepoName(state.Config, target)
 	if target.IsAllSubpackages() {
 		// Any command-line labels with subrepos and ... require us to know where they are in order to
 		// walk the directory tree, so we have to make sure the subrepo exists first.
 		dir := target.PackageName
 		prefix := ""
 		if target.Subrepo != "" {
-			state.WaitForInitialTargetAndEnsureDownload(target.SubrepoLabel(state, ""), target)
+			subrepoLabel := target.SubrepoLabel(state, "")
+			state.WaitForInitialTargetAndEnsureDownload(subrepoLabel, target)
+			// Targets now get activated during parsing, so can be built before we finish parsing their package.
+			state.WaitForPackage(subrepoLabel, target, core.ParseModeNormal)
 			subrepo := state.Graph.SubrepoOrDie(target.Subrepo)
 			dir = subrepo.Dir(dir)
 			prefix = subrepo.Dir(prefix)
 		}
 		for filename := range FindAllBuildFiles(state.Config, dir, "") {
-			dirname, _ := path.Split(filename)
+			dirname, _ := filepath.Split(filename)
 			l := core.NewBuildLabel(strings.TrimLeft(strings.TrimPrefix(strings.TrimRight(dirname, "/"), prefix), "/"), "all")
 			l.Subrepo = target.Subrepo
 			state.AddOriginalTarget(l, addToList)
@@ -172,7 +195,7 @@ func FindAllBuildFiles(config *core.Configuration, rootPath, prefix string) <-ch
 			rootPath = "."
 		}
 		if err := fs.Walk(rootPath, func(name string, isDir bool) error {
-			basename := path.Base(name)
+			basename := filepath.Base(name)
 			if basename == core.OutDir || (isDir && strings.HasPrefix(basename, ".") && name != ".") {
 				return filepath.SkipDir // Don't walk output or hidden directories
 			} else if isDir && !strings.HasPrefix(name, prefix) && !strings.HasPrefix(prefix, name) {
@@ -216,12 +239,31 @@ func ReadStdinLabels(labels []core.BuildLabel) []core.BuildLabel {
 	ret := []core.BuildLabel{}
 	for _, l := range labels {
 		if l == core.BuildLabelStdin {
-			for s := range flags.ReadStdin() {
-				ret = append(ret, core.ParseBuildLabels([]string{s})...)
-			}
+			ret = append(ret, ReadAndParseStdinLabels()...)
 		} else {
 			ret = append(ret, l)
 		}
 	}
 	return ret
+}
+
+// ReadAndParseStdinLabels unconditionally reads stdin and parses it into build labels.
+func ReadAndParseStdinLabels() []core.BuildLabel {
+	ret := []core.BuildLabel{}
+	for s := range flags.ReadStdin() {
+		ret = append(ret, core.ParseBuildLabels([]string{s})...)
+	}
+	return ret
+}
+
+// A limiter allows only a certain number of concurrent tasks
+// TODO(peterebden): We have about four of these now, commonise this somewhere
+type limiter chan struct{}
+
+func (l limiter) Acquire() {
+	l <- struct{}{}
+}
+
+func (l limiter) Release() {
+	<-l
 }

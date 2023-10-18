@@ -1,3 +1,5 @@
+subinclude("///shell//build_defs:shell")
+
 filegroup(
     name = "version",
     srcs = ["VERSION"],
@@ -37,8 +39,8 @@ sh_cmd(
     cmd = "plz fmt -w && gofmt -s -w src tools test && plz run parallel --include codegen",
 )
 
-github_repo(
-    name = "pleasings",
-    repo = "thought-machine/pleasings",
-    revision = "v1.0.0",
+filegroup(
+    name = "pgo",
+    srcs = ["default.pgo"],
+    visibility = ["//src/..."],
 )

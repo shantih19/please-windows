@@ -3,7 +3,6 @@ package lsp
 import (
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -45,6 +44,12 @@ func (d *doc) SetText(text string) {
 	d.Mutex.Lock()
 	defer d.Mutex.Unlock()
 	d.Content = strings.Split(text, "\n")
+}
+
+func (d *doc) AspFile() *asp.File {
+	d.Mutex.Lock()
+	defer d.Mutex.Unlock()
+	return asp.NewFile(d.Filename, []byte(strings.Join(d.Content, "\n")))
 }
 
 func (h *Handler) didOpen(params *lsp.DidOpenTextDocumentParams) error {
@@ -164,7 +169,7 @@ func (h *Handler) formatting(params *lsp.DocumentFormattingParams) ([]*lsp.TextE
 	doc := h.doc(params.TextDocument.URI)
 	// Ignore formatting options, BUILD files are always canonically formatted at 4-space tabs.
 	fn := build.ParseDefault
-	if h.state.Config.IsABuildFile(path.Base(doc.Filename)) {
+	if h.state.Config.IsABuildFile(filepath.Base(doc.Filename)) {
 		fn = build.ParseBuild
 	}
 	f, err := fn(doc.Filename, []byte(doc.Text()))

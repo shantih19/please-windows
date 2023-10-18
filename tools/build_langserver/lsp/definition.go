@@ -2,13 +2,10 @@ package lsp
 
 import (
 	"os"
-	"path"
 	"path/filepath"
-	"strings"
 
 	"github.com/sourcegraph/go-lsp"
 
-	"github.com/thought-machine/please/rules"
 	"github.com/thought-machine/please/src/core"
 	"github.com/thought-machine/please/src/parse/asp"
 	"github.com/thought-machine/please/tools/build_langserver/lsp/astutils"
@@ -19,11 +16,12 @@ import (
 func (h *Handler) definition(params *lsp.TextDocumentPositionParams) ([]lsp.Location, error) {
 	doc := h.doc(params.TextDocument.URI)
 	ast := h.parseIfNeeded(doc)
+	f := doc.AspFile()
 
 	var locs []lsp.Location
 	pos := aspPos(params.Position)
 	asp.WalkAST(ast, func(expr *asp.Expression) bool {
-		if !asp.WithinRange(pos, expr.Pos, expr.EndPos) {
+		if !asp.WithinRange(pos, f.Pos(expr.Pos), f.Pos(expr.EndPos)) {
 			return false
 		}
 
@@ -47,11 +45,11 @@ func (h *Handler) definition(params *lsp.TextDocumentPositionParams) ([]lsp.Loca
 	// It might also be a statement.
 	asp.WalkAST(ast, func(stmt *asp.Statement) bool {
 		if stmt.Ident != nil {
-			endPos := stmt.Pos
+			endPos := f.Pos(stmt.Pos)
 			// TODO(jpoole): The AST should probably just have this information
 			endPos.Column += len(stmt.Ident.Name)
 
-			if !asp.WithinRange(pos, stmt.Pos, endPos) {
+			if !asp.WithinRange(pos, f.Pos(stmt.Pos), endPos) {
 				return false
 			}
 
@@ -80,7 +78,7 @@ func (h *Handler) findLabel(currentPath, label string) lsp.Location {
 	}
 
 	pkg := h.state.Graph.PackageByLabel(l)
-	uri := lsp.DocumentURI("file://" + path.Join(h.root, pkg.Filename))
+	uri := lsp.DocumentURI("file://" + filepath.Join(h.root, pkg.Filename))
 	loc := lsp.Location{URI: uri}
 	doc, err := h.maybeOpenDoc(uri)
 	if err != nil {
@@ -88,14 +86,17 @@ func (h *Handler) findLabel(currentPath, label string) lsp.Location {
 		return loc
 	}
 	ast := h.parseIfNeeded(doc)
+	f := doc.AspFile()
 
 	// Try and find expression function calls
 	asp.WalkAST(ast, func(expr *asp.Expression) bool {
 		if expr.Val != nil && expr.Val.Call != nil {
 			if findName(expr.Val.Call.Arguments) == l.Name {
+				start := f.Pos(expr.Pos)
+				end := f.Pos(expr.EndPos)
 				loc.Range = lsp.Range{
-					Start: lsp.Position{Line: expr.Pos.Line, Character: expr.Pos.Column},
-					End:   lsp.Position{Line: expr.EndPos.Line, Character: expr.EndPos.Column},
+					Start: lsp.Position{Line: start.Line, Character: start.Column},
+					End:   lsp.Position{Line: end.Line, Character: end.Column},
 				}
 			}
 			return false
@@ -106,9 +107,11 @@ func (h *Handler) findLabel(currentPath, label string) lsp.Location {
 	asp.WalkAST(ast, func(stmt *asp.Statement) bool {
 		if stmt.Ident != nil && stmt.Ident.Action != nil && stmt.Ident.Action.Call != nil {
 			if findName(stmt.Ident.Action.Call.Arguments) == l.Name {
+				start := f.Pos(stmt.Pos)
+				end := f.Pos(stmt.EndPos)
 				loc.Range = lsp.Range{
-					Start: lsp.Position{Line: stmt.Pos.Line, Character: stmt.Pos.Column},
-					End:   lsp.Position{Line: stmt.EndPos.Line, Character: stmt.EndPos.Column},
+					Start: lsp.Position{Line: start.Line, Character: start.Column},
+					End:   lsp.Position{Line: end.Line, Character: end.Column},
 				}
 			}
 			return false
@@ -135,32 +138,8 @@ func findName(args []asp.CallArgument) string {
 // findGlobal returns the location of a global of the given name.
 func (h *Handler) findGlobal(name string) lsp.Location {
 	if f, present := h.builtins[name]; present {
-		if f.FuncDef.IsBuiltin && !strings.Contains(f.Pos.Filename, "/") {
-			// Extract the builtin to a temporary location so the user can see it.
-			dir, err := os.UserCacheDir()
-			if err != nil {
-				log.Warning("Cannot determine user cache dir: %s", err)
-				return lsp.Location{}
-			} else if err := os.MkdirAll(path.Join(dir, "please"), core.DirPermissions); err != nil {
-				log.Warning("Cannot create cache dir: %s", err)
-				return lsp.Location{}
-			}
-			dest := path.Join(dir, "please", f.Pos.Filename)
-			if data, err := rules.ReadAsset(f.Pos.Filename); err != nil {
-				log.Warning("Failed to extract builtin rules for %s: %s", name, err)
-				return lsp.Location{}
-			} else if err := os.WriteFile(dest, data, 0644); err != nil {
-				log.Warning("Failed to extract builtin rules for %s: %s", name, err)
-				return lsp.Location{}
-			}
-			f.Pos.Filename = dest
-		}
-		file := f.Pos.Filename
-		if !path.IsAbs(file) {
-			file = path.Join(h.root, f.Pos.Filename)
-		}
 		return lsp.Location{
-			URI:   lsp.DocumentURI("file://" + file),
+			URI:   lsp.DocumentURI("file://" + f.Pos.Filename),
 			Range: rng(f.Pos, f.EndPos),
 		}
 	}

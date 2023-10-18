@@ -4,6 +4,7 @@ package core
 
 import (
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/thought-machine/please/src/fs"
@@ -122,10 +123,11 @@ func NewFileLabel(src string, pkg *Package) BuildInput {
 	if pkg.Subrepo != nil {
 		return SubrepoFileLabel{
 			File:        src,
-			Package:     pkg.Name,
+			Package:     filepath.Join(pkg.Subrepo.PackageRoot, pkg.Name),
 			FullPackage: pkg.Subrepo.Dir(pkg.Name),
 		}
 	}
+
 	return FileLabel{File: src, Package: pkg.Name}
 }
 
@@ -238,7 +240,8 @@ func (label AnnotatedOutputLabel) Paths(graph *BuildGraph) []string {
 	if _, ok := target.EntryPoints[label.Annotation]; ok {
 		return label.BuildLabel.Paths(graph)
 	}
-	return addPathPrefix(target.NamedOutputs(label.Annotation), label.PackageName)
+
+	return addPathPrefix(target.NamedOutputs(label.Annotation), target.PackageDir())
 }
 
 // FullPaths is like Paths but includes the leading plz-out/gen directory.
@@ -274,17 +277,6 @@ func (label AnnotatedOutputLabel) String() string {
 		return label.BuildLabel.String()
 	}
 	return label.BuildLabel.String() + "|" + label.Annotation
-}
-
-// MustParseNamedOutputLabel attempts to parse a build output label. It's allowed to just be
-// a normal build label as well.
-// The syntax is an extension of normal build labels: //package:target|output
-func MustParseNamedOutputLabel(target string, pkg *Package) BuildInput {
-	if index := strings.IndexRune(target, '|'); index != -1 && index != len(target)-1 {
-		label := ParseBuildLabelContext(target[:index], pkg)
-		return AnnotatedOutputLabel{BuildLabel: label, Annotation: target[index+1:]}
-	}
-	return ParseBuildLabelContext(target, pkg)
 }
 
 // UnmarshalFlag unmarshals a build label from a command line flag. Implementation of flags.Unmarshaler interface.

@@ -21,9 +21,9 @@ import (
 var log = logging.Log
 
 // Exec allows the execution of a target or override command in a sandboxed environment that can also be configured to have some namespaces shared.
-func Exec(state *core.BuildState, label core.AnnotatedOutputLabel, dir string, env, overrideCmdArgs []string, foreground bool, sandbox process.SandboxConfig) int {
+func Exec(state *core.BuildState, label core.AnnotatedOutputLabel, dir string, env, overrideCmdArgs, additionalArgs []string, foreground bool, sandbox process.SandboxConfig) int {
 	target := state.Graph.TargetOrDie(label.BuildLabel)
-	return exitCode(exec(state, process.Default, target, dir, env, overrideCmdArgs, nil, label.Annotation, foreground, sandbox))
+	return exitCode(exec(state, process.Default, target, dir, env, overrideCmdArgs, additionalArgs, label.Annotation, foreground, sandbox))
 }
 
 // Sequential executes a series of targets in sequence, stopping when one fails.
@@ -33,7 +33,7 @@ func Sequential(state *core.BuildState, outputMode process.OutputMode, labels []
 		log.Notice("Executing %s...", label)
 		target := state.Graph.TargetOrDie(label.BuildLabel)
 		sandbox := process.NewSandboxConfig(target.Sandbox && !shareNetwork, target.Sandbox && !shareMount)
-		if err := exec(state, outputMode, target, target.ExecDir(), nil, env, args, label.Annotation, false, sandbox); err != nil {
+		if err := exec(state, outputMode, target, target.ExecDir(), env, nil, args, label.Annotation, false, sandbox); err != nil {
 			return exitCode(err)
 		}
 	}
@@ -74,7 +74,7 @@ func Parallel(state *core.BuildState, outputMode process.OutputMode, updateFrequ
 			atomic.AddInt64(&started, 1)
 			defer atomic.AddInt64(&done, 1)
 			sandbox := process.NewSandboxConfig(target.Sandbox && !shareNetwork, target.Sandbox && !shareMount)
-			return exec(state, outputMode, target, target.ExecDir(), nil, env, args, annotation, false, sandbox)
+			return exec(state, outputMode, target, target.ExecDir(), env, nil, args, annotation, false, sandbox)
 		})
 	}
 	return exitCode(g.Wait())

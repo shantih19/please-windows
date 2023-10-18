@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"hash"
 	"os"
-	"path"
+	"path/filepath"
 	"sort"
 
 	"github.com/thought-machine/please/src/core"
@@ -47,19 +47,6 @@ var boolFalseHashValue = []byte{1}
 
 // Return true if the rule needs building, false if the existing outputs are OK.
 func needsBuilding(state *core.BuildState, target *core.BuildTarget, postBuild bool) bool {
-	// Check the dependencies first, because they don't need any disk I/O.
-	if target.NeedsTransitiveDependencies {
-		if anyDependencyHasChanged(target) {
-			return true // one of the transitive deps has changed, need to rebuild
-		}
-	} else {
-		for _, dep := range target.Dependencies() {
-			if dep.State() < core.Unchanged {
-				log.Debug("Need to rebuild %s, %s has changed", target.Label, dep.Label)
-				return true // dependency has just been rebuilt, do this too.
-			}
-		}
-	}
 	// If the metadata file containing the std-out and additional outputs doesn't exist, rebuild
 	if !fs.FileExists(targetBuildMetadataFileName(target)) {
 		log.Debug("Need to rebuild %s, metadata file is missing", target.Label)
@@ -95,7 +82,7 @@ func needsBuilding(state *core.BuildState, target *core.BuildTarget, postBuild b
 	// removed them but it's incredibly aggravating if you remove an output and the
 	// rule won't rebuild itself.
 	for _, output := range target.Outputs() {
-		realOutput := path.Join(target.OutDir(), output)
+		realOutput := filepath.Join(target.OutDir(), output)
 		if !core.PathExists(realOutput) {
 			log.Debug("Output %s doesn't exist for rule %s; will rebuild.", realOutput, target.Label)
 			return true
@@ -111,29 +98,6 @@ func b64(b []byte) string {
 		return "<not found>"
 	}
 	return base64.RawStdEncoding.EncodeToString(b)
-}
-
-// Returns true if any transitive dependency of this target has changed.
-func anyDependencyHasChanged(target *core.BuildTarget) bool {
-	done := map[core.BuildLabel]bool{}
-	var inner func(*core.BuildTarget) bool
-	inner = func(dependency *core.BuildTarget) bool {
-		done[dependency.Label] = true
-		if dependency != target && dependency.State() < core.Unchanged {
-			return true
-		} else if !dependency.OutputIsComplete || dependency == target {
-			for _, dep := range dependency.Dependencies() {
-				if !done[dep.Label] {
-					if inner(dep) {
-						log.Debug("Need to rebuild %s, %s has changed", target.Label, dep.Label)
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}
-	return inner(target)
 }
 
 func mustSourceHash(state *core.BuildState, target *core.BuildTarget) []byte {
@@ -345,7 +309,7 @@ func readRuleHashFromXattrs(state *core.BuildState, target *core.BuildTarget, po
 			}
 		} else {
 			// Try the fallback file; target might not have had any outputs, for example.
-			h = fs.ReadAttrFile(path.Join(target.OutDir(), target.Label.Name))
+			h = fs.ReadAttrFile(filepath.Join(target.OutDir(), target.Label.Name))
 			if h == nil {
 				return ruleHashes{}
 			}
@@ -382,7 +346,7 @@ func writeRuleHash(state *core.BuildState, target *core.BuildTarget) error {
 	outputs := target.FullOutputs()
 	if len(outputs) == 0 {
 		// Target has no outputs, have to use the fallback file.
-		return fs.RecordAttrFile(path.Join(target.OutDir(), target.Label.Name), hash)
+		return fs.RecordAttrFile(filepath.Join(target.OutDir(), target.Label.Name), hash)
 	}
 	for _, output := range outputs {
 		if err := fs.RecordAttr(output, hash, xattrName, state.XattrsSupported); err != nil {
@@ -396,7 +360,7 @@ func writeRuleHash(state *core.BuildState, target *core.BuildTarget) error {
 }
 
 func targetBuildMetadataFileName(target *core.BuildTarget) string {
-	return path.Join(target.OutDir(), target.TargetBuildMetadataFileName())
+	return filepath.Join(target.OutDir(), target.TargetBuildMetadataFileName())
 }
 
 // loadTargetMetadata retrieves the target metadata from a file in the output directory of this target
@@ -423,7 +387,7 @@ func StoreTargetMetadata(target *core.BuildTarget, md *core.BuildMetadata) error
 	filename := targetBuildMetadataFileName(target)
 	if err := os.RemoveAll(filename); err != nil {
 		return fmt.Errorf("failed to remove existing %s build metadata file: %w", target.Label, err)
-	} else if err := os.MkdirAll(path.Dir(filename), core.DirPermissions); err != nil {
+	} else if err := os.MkdirAll(filepath.Dir(filename), core.DirPermissions); err != nil {
 		return fmt.Errorf("Failed to create directory for build metadata file for %s: %w", target, err)
 	}
 

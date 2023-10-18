@@ -13,6 +13,7 @@ for src in glob(
         "language.html",
         "config.html",
         "error.html",
+        "plugins.html",
     ],
 ):
     deps += [html_template(name = src.replace(".", "_").replace("/", "_"), src = src)]
@@ -30,6 +31,7 @@ genrule(
     local = True,
     sandbox = False,
     tools = ["//src:please"],
+    visibility = ["//docs/test/..."],
 )
 
 genrule(
@@ -42,7 +44,7 @@ genrule(
     ],
     outs = ["lexicon.html"],
     cmd = [
-        '"$TOOLS_LEX" > lexicon.html',
+        '"$TOOLS_LEX" -i docs/lexicon.html -i docs/lexicon_entry.html docs/rules.json > "$OUT"',
         '"$TOOLS_TMPL" --template docs/template.html --in lexicon.html > tmp.html',
         'mv tmp.html "$OUT"',
     ],
@@ -50,6 +52,53 @@ genrule(
         "lex": ["//docs/tools/lexicon_templater"],
         "tmpl": ["//docs/tools/templater"],
     },
+    visibility = ["//docs/test/..."],
+)
+
+# Plugin versions to pull the docs from
+plugins = {
+    "python": "v1.5.0",
+    "java": "v0.3.0",
+    "go": "v1.9.2",
+    "cc": "v0.4.0",
+    "shell": "v0.2.0",
+    "go-proto": "v0.2.1",
+    "python-proto": "v0.1.0",
+    "proto": "v0.2.1",
+}
+
+plugin_targets = []
+
+for plugin, revision in plugins.items():
+    plugin_rules_target = plugin_rules(name = plugin, revision = revision)
+    plugin_targets += [plugin_rules_target]
+
+filegroup(
+    name = "plugins",
+    exported_deps = plugin_targets,
+    visibility = ["//docs/test/..."],
+)
+
+genrule(
+    name = "plugins_html",
+    srcs = deps + [
+        "lexicon.html",
+        "lexicon_entry.html",
+        "template.html",
+        "plugins.html",
+    ],
+    outs = ["plugins.html"],
+    cmd = [
+        '"$TOOLS_PLUGIN" --plugin docs/plugins.html --lex docs/lexicon_entry.html docs/*_plugin.json > "$OUT"',
+        '"$TOOLS_TMPL" --template docs/template.html --in plugins.html > tmp.html',
+        'mv tmp.html "$OUT"',
+    ],
+    tools = {
+        "plugin": ["//docs/tools/plugin_templater"],
+        "tmpl": ["//docs/tools/templater"],
+    },
+    visibility = ["//docs/test/..."],
+    deps = [":plugins"],
 )
 
 genrule(
@@ -89,9 +138,11 @@ filegroup(
     name = "docs",
     srcs = glob(["images/*.png"]) + deps + [
         ":language_html",
+        ":plugins_html",
         ":lexicon_html",
         ":config_html",
         "tachyons-4.12.0.min.css",
+        "fonts.css",
         "styles.css",
         "action.js",
         "tabs.js",

@@ -82,10 +82,8 @@ func newConfig(state *core.BuildState) *pyConfig {
 	base["BUILD_CONFIG"] = pyString(state.Config.Build.Config)
 	base["DEBUG_PORT"] = pyInt(state.DebugPort)
 
-	if !state.Config.FeatureFlags.ExcludeGoRules {
-		base["GOOS"] = pyString(arch.OS)
-		base["GOARCH"] = pyString(arch.GoArch())
-	}
+	// >= is legal at the start of the plz version but it shouldn't appear to the BUILD file.
+	base["PLZ_VERSION"] = pyString(strings.TrimPrefix(state.Config.Please.Version.String(), ">="))
 
 	return &pyConfig{base: &pyConfigBase{dict: base}}
 }
@@ -104,11 +102,15 @@ func resolvePluginValue(values []string, subrepo string) []string {
 	ret := make([]string, len(values))
 	for i, v := range values {
 		if core.LooksLikeABuildLabel(v) {
-			l := core.ParseAnnotatedBuildLabel(v, "", subrepo)
+			label, annotation := core.SplitLabelAnnotation(v)
+			l, err := core.TryParseBuildLabel(label, "", subrepo)
+			if err != nil {
+				continue // I guess it wasn't a build label. Leave it alone.
+			}
 			// Force the full build label including empty subrepo so this is portable
 			v = fmt.Sprintf("///%v//%v:%v", l.Subrepo, l.PackageName, l.Name)
-			if l.Annotation != "" {
-				v = fmt.Sprintf("%v|%v", v, l.Annotation)
+			if annotation != "" {
+				v = fmt.Sprintf("%v|%v", v, annotation)
 			}
 		}
 		ret[i] = v
@@ -156,7 +158,7 @@ func pluginConfig(pluginState *core.BuildState, pkgState *core.BuildState) pyDic
 		fullConfigKey := fmt.Sprintf("%v.%v", pluginName, configKey)
 		value, ok := extraVals[strings.ToLower(configKey)]
 		if !ok {
-			// The default values are defined in the subrepo so should be parsed in that context
+			// The default values are defined in the subrepo so should be parsed in that scope
 			value = resolvePluginValue(definition.DefaultValue, pluginState.CurrentSubrepo)
 		} else {
 			value = resolvePluginValue(value, pkgState.CurrentSubrepo)
@@ -191,7 +193,7 @@ func pluginConfig(pluginState *core.BuildState, pkgState *core.BuildState) pyDic
 	return ret
 }
 
-func (i *interpreter) loadPluginConfig(pluginState *core.BuildState, pkgState *core.BuildState, c *pyConfig) {
+func (i *interpreter) loadPluginConfig(s *scope, pluginState *core.BuildState) {
 	if pluginState.RepoConfig == nil {
 		return
 	}
@@ -202,26 +204,17 @@ func (i *interpreter) loadPluginConfig(pluginState *core.BuildState, pkgState *c
 		return
 	}
 
-	var dict pyDict
-	if !c.base.finalised {
-		c.base.Lock()
-		defer c.base.Unlock()
-
-		dict = c.base.dict
-	} else {
-		if c.overlay == nil {
-			c.overlay = pyDict{}
-		}
-		dict = c.overlay
+	if s.config.overlay == nil {
+		s.config.overlay = pyDict{}
 	}
 
 	key := strings.ToUpper(pluginName)
-	if _, ok := dict[key]; ok {
+	if _, ok := s.config.overlay[key]; ok {
 		return
 	}
 
-	cfg := pluginConfig(pluginState, pkgState)
-	dict[key] = cfg
+	cfg := pluginConfig(pluginState, s.state)
+	s.config.overlay[key] = cfg
 }
 
 func toPyObject(key, val, toType string) pyObject {

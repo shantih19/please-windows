@@ -4,7 +4,7 @@ package help
 import (
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -27,12 +27,18 @@ const maxSuggestionDistance = 4
 // Help prints help on a particular topic.
 // It returns true if the topic is known or false if it isn't.
 func Help(topic string) bool {
-	if message := help(topic); message != "" {
+	config, err := core.ReadDefaultConfigFiles(nil)
+	if err != nil {
+		// Don't bother the user if we can't load config files or whatever - just do our best.
+		config = core.DefaultConfiguration()
+	}
+
+	if message := help(topic, config); message != "" {
 		printMessage(message)
 		return true
 	}
 	fmt.Printf("Sorry OP, can't halp you with %s\n", topic)
-	if message := suggest(topic); message != "" {
+	if message := suggest(topic, config); message != "" {
 		printMessage(message)
 		fmt.Printf(" Or have a look on the website: https://please.build\n")
 	} else {
@@ -42,22 +48,16 @@ func Help(topic string) bool {
 }
 
 // Topics prints the list of help topics beginning with the given prefix.
-func Topics(prefix string) {
-	for _, topic := range allTopics(prefix) {
+func Topics(prefix string, config *core.Configuration) {
+	for _, topic := range allTopics(prefix, config) {
 		fmt.Println(topic)
 	}
 }
 
-func help(topic string) string {
-	config, err := core.ReadDefaultConfigFiles(nil)
-	if err != nil {
-		// Don't bother the user if we can't load config files or whatever - just do our best.
-		config = core.DefaultConfiguration()
-	}
-
+func help(topic string, config *core.Configuration) string {
 	topic = strings.ToLower(topic)
 	if topic == "topics" {
-		return fmt.Sprintf(topicsHelpMessage, strings.Join(allTopics(""), "\n"))
+		return fmt.Sprintf(topicsHelpMessage, strings.Join(allTopics("", config), "\n"))
 	}
 	for _, section := range []helpSection{allConfigHelp(config), miscTopics} {
 		if message, found := section.Topics[topic]; found {
@@ -84,6 +84,7 @@ func help(topic string) string {
 
 // helpForPlugin returns some help text for a plugin
 func helpForPlugin(config *core.Configuration, topic string) string {
+	// Check if the topic is a plugin
 	if _, ok := config.Plugin[topic]; ok {
 		message := fmt.Sprintf("${BOLD_BLUE}%v${RESET} is a plugin defined in the ${GREEN}.plzconfig${RESET} file.\n", topic)
 
@@ -91,18 +92,37 @@ func helpForPlugin(config *core.Configuration, topic string) string {
 		if buildLabel.String() == "" {
 			log.Fatalf("Plugin target must be specified in config")
 		}
-		state := newState()
+		subrepo := getSubrepoOrDie(topic, buildLabel)
 
-		// Parse the subrepo (Run reads the plugin config into config)
-		plz.Run([]core.BuildLabel{buildLabel}, nil, state, config, state.TargetArch)
-		subrepo := state.Graph.Subrepo(topic)
-		if subrepo == nil {
-			log.Fatalf("Tried to get subrepo %v but failed", topic)
+		return pluginHelpMessage(subrepo, message)
+	}
+
+	// Check if the topic is a build rule defined in a plugin
+	for pluginName, plugin := range config.Plugin {
+		buildLabel := plugin.Target
+		if buildLabel.String() == "" {
+			log.Fatalf("Plugin target must be specified in config")
 		}
 
-		return getPluginOptionsAndBuildDefs(subrepo, message)
+		subrepo := getSubrepoOrDie(pluginName, buildLabel)
+		buildRules := getPluginBuildDefs(subrepo)
+		if rule, present := buildRules[topic]; present {
+			return helpFromBuildRule(rule.FuncDef)
+		}
 	}
+
 	return ""
+}
+
+// getSubrepoOrDie builds and returns a subrepo.
+func getSubrepoOrDie(name string, target core.BuildLabel) *core.Subrepo {
+	state := newState()
+
+	// This is sufficient to get everything we need. The parsing of the build def files happens in getPluginBuildDefs.
+	state.ParsePackageOnly = true
+
+	plz.Run([]core.BuildLabel{target}, nil, state, state.Config, state.TargetArch)
+	return state.Graph.SubrepoOrDie(name)
 }
 
 // formatConfigKey converts the config key from snake_case to CamelCase
@@ -115,24 +135,37 @@ func formatConfigKey(key string) string {
 	return strings.Join(parts, "")
 }
 
-// getPluginOptionsAndBuildDefs looks for information for the plugin specified in the config file
-func getPluginOptionsAndBuildDefs(subrepo *core.Subrepo, message string) string {
+// getPluginConfig returns a map of config options defined by a plugin
+func getPluginConfig(subrepo *core.Subrepo) map[string]*core.PluginConfigDefinition {
+	config := subrepo.State.RepoConfig
+	return config.PluginConfig
+}
+
+func pluginHelpMessage(subrepo *core.Subrepo, message string) string {
 	config := subrepo.State.Config
-	if config.PluginDefinition.Description != "" {
-		message += "\n" + config.PluginDefinition.Description + "\n"
+	description := config.PluginDefinition.Description
+	docSite := config.PluginDefinition.DocumentationSite
+	options := getPluginConfig(subrepo)
+	buildRules := getPluginBuildDefs(subrepo)
+
+	return formatPluginHelpMessage(message,
+		description,
+		docSite,
+		options,
+		buildRules,
+	)
+}
+
+// formatPluginHelpMessage formats plugin information for the help command
+func formatPluginHelpMessage(message, description, docSite string, options map[string]*core.PluginConfigDefinition, buildRulesMap map[string]*asp.Statement) string {
+	if description != "" {
+		message += "\n" + description + "\n"
 	}
-	if config.PluginDefinition.DocumentationSite != "" {
-		message += "\n" + config.PluginDefinition.DocumentationSite + "\n"
+	if docSite != "" {
+		message += "\n" + docSite + "\n"
 	}
 	configOptions := ""
-	// Ensure these come out in the same order
-	keys := make([]string, 0, len(config.PluginConfig))
-	for k := range config.PluginConfig {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		v := config.PluginConfig[k]
+	for k, v := range options {
 		valueType := v.Type
 		if v.Type == "" {
 			valueType = "string"
@@ -169,9 +202,8 @@ func getPluginOptionsAndBuildDefs(subrepo *core.Subrepo, message string) string 
 		message += "\n${BOLD_YELLOW}This plugin has the following options:${RESET}\n" + configOptions
 	}
 
-	buildFuncMap := populatePluginBuildFuncs(subrepo)
 	buildDefs := ""
-	for k, v := range buildFuncMap {
+	for k, v := range buildRulesMap {
 		buildDefs += fmt.Sprintf("${BLUE}   %v${RESET}", strings.ToLower(k))
 		arglist := "("
 		for i, arg := range v.FuncDef.Arguments {
@@ -190,16 +222,16 @@ func getPluginOptionsAndBuildDefs(subrepo *core.Subrepo, message string) string 
 	return message
 }
 
-func populatePluginBuildFuncs(subrepo *core.Subrepo) map[string]*asp.Statement {
+func getPluginBuildDefs(subrepo *core.Subrepo) map[string]*asp.Statement {
 	p := asp.NewParser(subrepo.State)
 	var dirs []string
 	if len(subrepo.State.Config.PluginDefinition.BuildDefsDir) > 0 {
 		for _, dir := range subrepo.State.Config.PluginDefinition.BuildDefsDir {
-			dirs = append(dirs, path.Join(subrepo.Root, dir))
+			dirs = append(dirs, filepath.Join(subrepo.Root, dir))
 		}
 	} else {
 		// By default, check the build_defs dir in the plugin
-		dirs = append(dirs, path.Join(subrepo.Root, "build_defs"))
+		dirs = append(dirs, filepath.Join(subrepo.Root, "build_defs"))
 	}
 
 	ret := make(map[string]*asp.Statement)
@@ -207,7 +239,7 @@ func populatePluginBuildFuncs(subrepo *core.Subrepo) map[string]*asp.Statement {
 		if files, err := os.ReadDir(dir); err == nil {
 			for _, file := range files {
 				if !file.IsDir() {
-					if stmts, err := p.ParseFileOnly(path.Join(dir, file.Name())); err == nil {
+					if stmts, err := p.ParseFileOnly(filepath.Join(dir, file.Name())); err == nil {
 						addAllFunctions(ret, stmts, false)
 					}
 				}
@@ -234,25 +266,48 @@ func helpFromBuildRule(f *asp.FuncDef) string {
 }
 
 // suggest looks through all known help topics and tries to make a suggestion about what the user might have meant.
-func suggest(topic string) string {
-	return cli.PrettyPrintSuggestion(topic, allTopics(""), maxSuggestionDistance)
+func suggest(topic string, config *core.Configuration) string {
+	return cli.PrettyPrintSuggestion(topic, allTopics("", config), maxSuggestionDistance)
 }
 
 // allTopics returns all the possible topics to get help on.
-func allTopics(prefix string) []string {
+func allTopics(prefix string, config *core.Configuration) []string {
 	topics := []string{}
-	for _, section := range []helpSection{allConfigHelp(core.DefaultConfiguration()), miscTopics} {
+
+	// Config options
+	for _, section := range []helpSection{allConfigHelp(config), miscTopics} {
 		for t := range section.Topics {
 			if strings.HasPrefix(t, prefix) {
 				topics = append(topics, t)
 			}
 		}
 	}
+
+	// Built-in rules
 	for t := range AllBuiltinFunctions(newState()) {
 		if strings.HasPrefix(t, prefix) {
 			topics = append(topics, t)
 		}
 	}
+
+	// Plugins
+	for pluginName, plugin := range config.Plugin {
+		if strings.HasPrefix(pluginName, prefix) {
+			topics = append(topics, pluginName)
+		}
+		subrepo := getSubrepoOrDie(pluginName, plugin.Target)
+		for k := range getPluginConfig(subrepo) {
+			if strings.HasPrefix(k, prefix) {
+				topics = append(topics, k)
+			}
+		}
+		for k := range getPluginBuildDefs(subrepo) {
+			if strings.HasPrefix(k, prefix) {
+				topics = append(topics, k)
+			}
+		}
+	}
+
 	sort.Strings(topics)
 	return topics
 }
@@ -276,7 +331,7 @@ func printMessage(msg string) {
 
 const docstringTemplate = `${BLUE}{{ .Name }}${RESET} is
 {{- if .IsBuiltin }} a built-in build rule in Please.
-{{- else }} an add-on build rule for Please defined in ${YELLOW}{{ .EoDef.Filename }}${RESET}.
+{{- else }} an add-on build rule for Please${RESET}.
 {{- end }} Instructions for use & its arguments:
 
 ${BOLD_YELLOW}{{ .Name }}${RESET}(

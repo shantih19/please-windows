@@ -2,29 +2,36 @@ subinclude("//build_defs:version")
 
 go_library(
     name = "update",
-    srcs = glob(
-        ["*.go"],
-        exclude = ["*_test.go"],
-    ),
-    resources = ["pubkey.pem"],
+    srcs = [
+        "clean.go",
+        "update.go",
+        "verify.go",
+    ],
+    pgo_file = "//:pgo",
+    resources = glob(["key.pub"]),
     visibility = ["PUBLIC"],
     deps = [
+        "///third_party/go/github.com_coreos_go-semver//semver",
+        "///third_party/go/github.com_hashicorp_go-retryablehttp//:go-retryablehttp",
+        "///third_party/go/github.com_sigstore_sigstore//pkg/cryptoutils",
+        "///third_party/go/github.com_sigstore_sigstore//pkg/signature",
+        "///third_party/go/github.com_ulikunitz_xz//:xz",
         "//src/cli",
         "//src/cli/logging",
         "//src/core",
         "//src/fs",
         "//src/process",
-        "//third_party/go:go-crypto",
-        "//third_party/go:go-retryablehttp",
-        "//third_party/go:semver",
-        "//third_party/go:xz",
     ],
 )
 
 go_test(
     name = "update_test",
-    srcs = ["update_test.go"],
+    srcs = [
+        "update_test.go",
+        "verify_test.go",
+    ],
     data = [
+        "test_data",
         ":test_please",
         ":test_tarball",
         "//src:please",
@@ -33,25 +40,16 @@ go_test(
         "github.com/thought-machine/please/src/core.PleaseVersion": VERSION,
     },
     labels = ["xz"],
-    resources = ["pubkey.pem"],
+    resources = ["key.pub"],
     deps = [
         ":update",
+        "///third_party/go/github.com_hashicorp_go-retryablehttp//:go-retryablehttp",
+        "///third_party/go/github.com_sigstore_sigstore//pkg/cryptoutils",
+        "///third_party/go/github.com_sigstore_sigstore//pkg/signature",
+        "///third_party/go/github.com_stretchr_testify//assert",
+        "///third_party/go/gopkg.in_op_go-logging.v1//:go-logging.v1",
         "//src/cli",
-        "//src/cli/logging",
-        "//third_party/go:go-retryablehttp",
-        "//third_party/go:logging",
-        "//third_party/go:testify",
-    ],
-)
-
-go_test(
-    name = "verify_test",
-    srcs = ["verify_test.go"],
-    data = ["test_data"],
-    resources = ["pubkey.pem"],
-    deps = [
-        ":update",
-        "//third_party/go:testify",
+        "//src/core",
     ],
 )
 

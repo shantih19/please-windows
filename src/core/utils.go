@@ -5,7 +5,6 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -48,7 +47,7 @@ func MustFindRepoRoot() string {
 	RepoRoot, InitialPackagePath = getRepoRoot("WORKSPACE")
 	if RepoRoot != "" {
 		log.Warning("No .plzconfig file found to define the repo root.")
-		log.Warning("Falling back to Bazel WORKSPACE at %s", path.Join(RepoRoot, "WORKSPACE"))
+		log.Warning("Falling back to Bazel WORKSPACE at %s", filepath.Join(RepoRoot, "WORKSPACE"))
 		usingBazelWorkspace = true
 		return RepoRoot
 	}
@@ -92,10 +91,10 @@ func getRepoRoot(filename string) (string, string) {
 	// Walk up directories looking for a .plzconfig file, which we use to identify the root.
 	initial := dir
 	for dir != "" {
-		if PathExists(path.Join(dir, filename)) {
+		if PathExists(filepath.Join(dir, filename)) {
 			return dir, strings.TrimLeft(initial[len(dir):], "/")
 		}
-		dir, _ = path.Split(dir)
+		dir, _ = filepath.Split(dir)
 		dir = strings.TrimRight(dir, "/")
 	}
 	return "", ""
@@ -130,7 +129,7 @@ func IterSources(state *BuildState, graph *BuildGraph, target *BuildTarget, incl
 		for input := range IterInputs(state, graph, target, includeTools, false) {
 			fullPaths := input.FullPaths(graph)
 			for i, sourcePath := range input.Paths(graph) {
-				if tmpPath := path.Join(tmpDir, sourcePath); !done[tmpPath] {
+				if tmpPath := filepath.Join(tmpDir, sourcePath); !done[tmpPath] {
 					ch <- SourcePair{fullPaths[i], tmpPath}
 					done[tmpPath] = true
 				}
@@ -150,17 +149,10 @@ func IterInputs(state *BuildState, graph *BuildGraph, target *BuildTarget, inclu
 		if dependency != target {
 			ch <- dependency.Label
 		}
-		if !state.Config.FeatureFlags.NoIterSourcesMarked {
-			// All the sources of this target now count as done
-			for _, src := range dependency.AllSources() {
-				if label, ok := src.Label(); ok && dependency.IsSourceOnlyDep(label) {
-					done[label] = true
-				}
-			}
-		}
+
 		done[dependency.Label] = true
 		if target == dependency || (target.NeedsTransitiveDependencies && !dependency.OutputIsComplete) {
-			for _, dep := range dependency.BuildDependencies(state) {
+			for _, dep := range dependency.BuildDependencies() {
 				for _, dep2 := range recursivelyProvideFor(graph, target, dependency, dep.Label) {
 					if !done[dep2] && !dependency.IsTool(dep2) {
 						inner(graph.TargetOrDie(dep2))
@@ -236,7 +228,7 @@ func IterRuntimeFiles(graph *BuildGraph, target *BuildTarget, absoluteOuts bool,
 
 	pushOut := func(src, out string) {
 		if absoluteOuts {
-			out = path.Join(RepoRoot, runtimeDir, out)
+			out = filepath.Join(RepoRoot, runtimeDir, out)
 		}
 		if !done[out] {
 			ch <- SourcePair{src, out}
@@ -247,7 +239,7 @@ func IterRuntimeFiles(graph *BuildGraph, target *BuildTarget, absoluteOuts bool,
 	go func() {
 		outDir := target.OutDir()
 		for _, out := range target.Outputs() {
-			pushOut(path.Join(outDir, out), out)
+			pushOut(filepath.Join(outDir, out), out)
 		}
 
 		for _, data := range target.AllData() {
@@ -352,7 +344,7 @@ func IterInputPaths(graph *BuildGraph, target *BuildTarget) <-chan string {
 
 // PrepareSource symlinks a single source file for a build rule.
 func PrepareSource(sourcePath string, tmpPath string) error {
-	dir := path.Dir(tmpPath)
+	dir := filepath.Dir(tmpPath)
 	if !PathExists(dir) {
 		if err := os.MkdirAll(dir, DirPermissions); err != nil {
 			return err
@@ -366,10 +358,10 @@ func PrepareSource(sourcePath string, tmpPath string) error {
 
 // PrepareSourcePair prepares a source file for a build.
 func PrepareSourcePair(pair SourcePair) error {
-	if path.IsAbs(pair.Src) {
+	if filepath.IsAbs(pair.Src) {
 		return PrepareSource(pair.Src, pair.Tmp)
 	}
-	return PrepareSource(path.Join(RepoRoot, pair.Src), pair.Tmp)
+	return PrepareSource(filepath.Join(RepoRoot, pair.Src), pair.Tmp)
 }
 
 // PrepareRuntimeDir prepares a directory with a target's runtime data for a command to be run on.
@@ -422,7 +414,7 @@ func CollapseHash(key []byte) []byte {
 func LookPath(filename string, paths []string) (string, error) {
 	for _, p := range paths {
 		for _, p2 := range strings.Split(p, ":") {
-			p3 := path.Join(p2, filename)
+			p3 := filepath.Join(p2, filename)
 			if _, err := os.Stat(p3); err == nil {
 				return p3, nil
 			}

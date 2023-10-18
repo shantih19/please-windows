@@ -2,6 +2,8 @@ package metrics
 
 import (
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,8 +22,34 @@ var registerer = prometheus.WrapRegistererWith(prometheus.Labels{
 
 // Push performs a single push of all registered metrics to the pushgateway (if configured).
 func Push(config *core.Configuration) {
+	if family, err := prometheus.DefaultGatherer.Gather(); err == nil {
+		for _, fam := range family {
+			for _, metric := range fam.Metric {
+				if metric.Counter != nil {
+					log.Debug("Metric recorded: %s: %0.0f", *fam.Name, *metric.Counter.Value)
+				}
+			}
+		}
+	}
+
 	if config.Metrics.PrometheusGatewayURL == "" {
 		return
+	}
+
+	if config.Metrics.PushHostInfo {
+		name, _ := os.Hostname()
+		counter := prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "plz",
+			Subsystem: "metrics",
+			Name:      "hostinfo",
+			Help:      "Please host running info",
+			ConstLabels: prometheus.Labels{
+				"remote":   strconv.FormatBool(config.IsRemoteExecution()),
+				"hostname": name,
+			},
+		})
+		MustRegister(counter)
+		counter.Inc()
 	}
 
 	if err := push.New(config.Metrics.PrometheusGatewayURL, "please").

@@ -14,7 +14,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -79,8 +79,7 @@ func (builder *filegroupBuilder) Build(state *core.BuildState, target *core.Buil
 	} else if same {
 		// File exists already and is the same file. Nothing to do.
 		builder.built[to] = false
-		state.PathHasher.MoveHash(from, to, true)
-
+		state.PathHasher.CopyHash(from, to)
 		return false, nil
 	}
 	// Must actually build the file.
@@ -96,7 +95,7 @@ func (builder *filegroupBuilder) Build(state *core.BuildState, target *core.Buil
 		}
 	}
 	builder.built[to] = true
-	state.PathHasher.MoveHash(from, to, true)
+	state.PathHasher.CopyHash(from, to)
 	return true, nil
 }
 
@@ -111,12 +110,27 @@ func buildFilegroup(state *core.BuildState, target *core.BuildTarget) (bool, err
 	outDir := target.OutDir()
 	localSources := target.AllSourceLocalPaths(state.Graph)
 	for i, source := range target.AllSourceFullPaths(state.Graph) {
-		out := path.Join(outDir, localSources[i])
+		out := filepath.Join(outDir, localSources[i])
 		fileChanged, err := theFilegroupBuilder.Build(state, target, source, out)
 		if err != nil {
 			return true, err
 		}
 		changed = changed || fileChanged
+	}
+
+	// When src targets are in the same package as us, the `source` and `out` paths are the same so the files are
+	// considered unchanged. We should consider ourselves changed though, as the sources Might indeed have changed.
+	for _, bi := range target.AllSources() {
+		if changed {
+			break
+		}
+		l, ok := bi.Label()
+		if !ok || !target.Label.InSamePackageAs(l) {
+			continue
+		}
+		if ok && state.Graph.TargetOrDie(l).State() < core.Unchanged {
+			changed = true
+		}
 	}
 
 	if target.HasLabel("py") && !target.IsBinary {
@@ -142,22 +156,22 @@ func copyFilegroupHashes(state *core.BuildState, target *core.BuildTarget) {
 	outDir := target.OutDir()
 	localSources := target.AllSourceLocalPaths(state.Graph)
 	for i, source := range target.AllSourceFullPaths(state.Graph) {
-		if out := path.Join(outDir, localSources[i]); out != source {
-			state.PathHasher.MoveHash(source, out, true)
+		if out := filepath.Join(outDir, localSources[i]); out != source {
+			state.PathHasher.CopyHash(source, out)
 		}
 	}
 }
 
 func createInitPy(dir string) {
-	initPy := path.Join(dir, "__init__.py")
+	initPy := filepath.Join(dir, "__init__.py")
 	if core.PathExists(initPy) {
 		return
 	}
 	if f, err := os.OpenFile(initPy, os.O_RDONLY|os.O_CREATE, 0444); err == nil {
 		f.Close()
 	}
-	dir = path.Dir(dir)
-	if dir != core.GenDir && dir != "." && !core.PathExists(path.Join(dir, "__init__.py")) {
+	dir = filepath.Dir(dir)
+	if dir != core.GenDir && dir != "." && !core.PathExists(filepath.Join(dir, "__init__.py")) {
 		createInitPy(dir)
 	}
 }

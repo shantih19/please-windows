@@ -3,6 +3,7 @@ package asp
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -310,6 +311,9 @@ func addEntryPoints(s *scope, arg pyObject, target *core.BuildTarget) {
 		entryPoint, ok := entryPointPy.(pyString)
 		s.Assert(ok, "Values of entry_points must be strings, found %v at key %v", entryPointPy.Type(), name)
 		s.Assert(target.NamedOutputs(entryPoint.String()) == nil, "Entry points can't have the same name as a named output")
+		if target.IsFilegroup {
+			s.Assert(target.NamedSources[entryPoint.String()] == nil, "Entry points can't have the same name as a named source on a filegroup")
+		}
 		entryPoints[name] = string(entryPoint)
 	}
 
@@ -424,7 +428,7 @@ func addMaybeNamedSecret(s *scope, name string, obj pyObject, anon func(string),
 	validateSecret := func(secret string) {
 		s.NAssert(strings.HasPrefix(secret, "//"),
 			"Secret %s of %s cannot be a build label", secret, t.Label.Name)
-		s.Assert(strings.HasPrefix(secret, "/") || strings.HasPrefix(secret, "~"),
+		s.Assert(filepath.IsAbs(secret) || strings.HasPrefix(secret, "~"),
 			"Secret '%s' of %s is not an absolute path", secret, t.Label.Name)
 	}
 
@@ -466,7 +470,7 @@ func addDependencies(s *scope, name string, obj pyObject, target *core.BuildTarg
 			// *sigh*... Bazel seems to allow an implicit : on the start of dependencies
 			str = ":" + str
 		}
-		target.AddMaybeExportedDependency(checkLabel(s, core.ParseBuildLabelContext(str, s.pkg)), exported, false, internal)
+		target.AddMaybeExportedDependency(checkLabel(s, s.parseLabelInPackage(str, s.pkg)), exported, false, internal)
 	})
 }
 
@@ -497,7 +501,7 @@ func addProvides(s *scope, name string, obj pyObject, t *core.BuildTarget) {
 		for k, v := range d {
 			str, ok := v.(pyString)
 			s.Assert(ok, "%s values must be strings", name)
-			t.AddProvide(k, checkLabel(s, core.ParseBuildLabelContext(string(str), s.pkg)))
+			t.AddProvide(k, checkLabel(s, s.parseLabelInPackage(string(str), s.pkg)))
 		}
 	}
 }
@@ -508,7 +512,7 @@ func parseVisibility(s *scope, vis string) core.BuildLabel {
 	if vis == "PUBLIC" || (s.state.Config.Bazel.Compatibility && vis == "//visibility:public") {
 		return core.WholeGraph[0]
 	}
-	l := core.ParseBuildLabelContext(vis, s.pkg)
+	l := s.parseLabelInPackage(vis, s.pkg)
 	if s.state.Config.Bazel.Compatibility {
 		// Bazel has a couple of special aliases for this stuff.
 		if l.Name == "__pkg__" {
@@ -540,7 +544,7 @@ func parseSource(s *scope, src string, systemAllowed, tool bool) core.BuildInput
 				Name: pkg.Name,
 			}
 		}
-		label := core.MustParseNamedOutputLabel(src, pkg)
+		label := s.parseAnnotatedLabelInPackage(src, pkg)
 		if l, ok := label.Label(); ok {
 			checkLabel(s, l)
 		}
@@ -548,7 +552,7 @@ func parseSource(s *scope, src string, systemAllowed, tool bool) core.BuildInput
 	}
 	s.Assert(src != "", "Empty source path")
 	s.Assert(!strings.Contains(src, "../"), "%s is an invalid path; build target paths can't contain ../", src)
-	if src[0] == '/' || src[0] == '~' {
+	if filepath.IsAbs(src) || src[0] == '~' {
 		s.Assert(systemAllowed, "%s is an absolute path; that's not allowed", src)
 		return core.SystemFileLabel{Path: strings.TrimRight(src, "/")}
 	} else if tool {
@@ -584,7 +588,7 @@ type preBuildFunction struct {
 }
 
 func (f *preBuildFunction) Call(target *core.BuildTarget) error {
-	s := f.f.scope.NewPackagedScope(f.f.scope.state.Graph.PackageOrDie(target.Label), 1)
+	s := f.f.scope.NewPackagedScope(f.f.scope.state.Graph.PackageOrDie(target.Label), f.f.scope.mode, 1)
 	s.config = f.s.config
 	s.Set("CONFIG", f.s.config)
 	s.Callback = true
@@ -604,7 +608,7 @@ type postBuildFunction struct {
 }
 
 func (f *postBuildFunction) Call(target *core.BuildTarget, output string) error {
-	s := f.f.scope.NewPackagedScope(f.f.scope.state.Graph.PackageOrDie(target.Label), 2)
+	s := f.f.scope.NewPackagedScope(f.f.scope.state.Graph.PackageOrDie(target.Label), f.f.scope.mode, 2)
 	s.config = f.s.config
 	s.Set("CONFIG", f.s.config)
 	s.Callback = true

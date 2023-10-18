@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -47,6 +46,7 @@ func MonitorState(state *core.BuildState, plainOutput, detailedTests, streamTest
 	defer t.Stop()
 	results := state.Results()
 	bt := newBuildingTargets(state, plainOutput)
+	displayer.Update(bt.Targets())
 loop:
 	for {
 		select {
@@ -54,9 +54,8 @@ loop:
 			if !ok || (state.DebugFailingTests && result.Status == core.TargetTesting) {
 				break loop
 			}
-			prev := bt.ProcessResult(result)
-			if tw != nil && !result.Status.IsParse() {
-				tw.AddTrace(result, prev, result.Status.IsActive())
+			if threadID := bt.ProcessResult(result); tw != nil && !result.Status.IsParse() {
+				tw.AddTrace(threadID, result, result.Status.IsActive())
 			}
 			if streamTestResults && (result.Status == core.TargetTested || result.Status == core.TargetTestFailed) {
 				os.Stdout.Write(test.SerialiseResultsToXML(state.Graph.TargetOrDie(result.Label), false, state.Config.Test.StoreTestOutputOnSuccess))
@@ -101,7 +100,10 @@ loop:
 		}
 		msgs, totalMessages, actualMessages := cli.CurrentBackend.GetMessageHistory()
 		if actualMessages > 0 && !plainOutput {
-			printf("Messages:\n%s\n", strings.Join(msgs, "\n"))
+			printf("Messages:\n")
+			for _, msg := range msgs {
+				printf("%s\n", msg)
+			}
 			if totalMessages != actualMessages {
 				printf("plus %d more... see plz-out/log/build.log\n", totalMessages-actualMessages)
 			}
@@ -354,7 +356,7 @@ func testResultMessage(results *core.TestSuite, showDuration bool) string {
 		msg += fmt.Sprintf(", ${BOLD_MAGENTA}%s${RESET}", pluralise(results.FlakyPasses(), "flake", "flakes"))
 	}
 	if results.TimedOut {
-		msg += ", ${RED_ON_WHITE}TIMED OUT${RESET}"
+		msg += ", ${WHITE_ON_RED}TIMED OUT${RESET}"
 	}
 	if results.Cached {
 		msg += " ${GREEN}[cached]${RESET}"
@@ -420,11 +422,11 @@ func printTempDirs(state *core.BuildState, duration time.Duration, shell, shellR
 		target := state.Graph.TargetOrDie(label)
 		cmd := target.GetCommand(state)
 		dir := target.TmpDir()
-		env := core.StampedBuildEnvironment(state, target, nil, path.Join(core.RepoRoot, target.TmpDir()), target.Stamp)
+		env := core.StampedBuildEnvironment(state, target, nil, filepath.Join(core.RepoRoot, target.TmpDir()), target.Stamp)
 		shouldSandbox := target.Sandbox
 		if state.NeedTests {
 			cmd = target.GetTestCommand(state)
-			dir = path.Join(core.RepoRoot, target.TestDir(1))
+			dir = filepath.Join(core.RepoRoot, target.TestDir(1))
 			env = core.TestEnvironment(state, target, dir)
 			shouldSandbox = target.Test.Sandbox
 			if len(state.TestArgs) > 0 {
@@ -463,9 +465,9 @@ func buildResult(target *core.BuildTarget) []string {
 	if target != nil {
 		for _, out := range target.Outputs() {
 			if core.StartedAtRepoRoot() {
-				results = append(results, path.Join(target.OutDir(), out))
+				results = append(results, filepath.Join(target.OutDir(), out))
 			} else {
-				results = append(results, path.Join(core.RepoRoot, target.OutDir(), out))
+				results = append(results, filepath.Join(core.RepoRoot, target.OutDir(), out))
 			}
 		}
 	}
@@ -574,7 +576,7 @@ func shouldInclude(file string, files []string) bool {
 		return true
 	}
 	for _, f := range files {
-		if isMatch, _ := path.Match(f, file); isMatch {
+		if isMatch, _ := filepath.Match(f, file); isMatch {
 			return true
 		}
 	}

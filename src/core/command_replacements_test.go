@@ -5,7 +5,7 @@ package core
 import (
 	"encoding/base64"
 	"os"
-	"path"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -75,26 +75,6 @@ func TestOutExe(t *testing.T) {
 	assert.Equal(t, expected, replaceSequences(state, target1))
 }
 
-func TestJavaExe(t *testing.T) {
-	target2 := makeTarget2("//path/to:target2", "", nil)
-	target2.IsBinary = true
-	target2.AddLabel("java_non_exe") // This label tells us to prefix it with java -jar.
-	target1 := makeTarget2("//path/to:target1", "$(exe //path/to:target2) -o ${OUT}", target2)
-
-	expected := "java -jar path/to/target2.py -o ${OUT}"
-	assert.Equal(t, expected, replaceSequences(state, target1))
-}
-
-func TestJavaOutExe(t *testing.T) {
-	target2 := makeTarget2("//path/to:target2", "", nil)
-	target2.IsBinary = true
-	target2.AddLabel("java_non_exe") // This label tells us to prefix it with java -jar.
-	target1 := makeTarget2("//path/to:target1", "$(out_exe //path/to:target2) -o ${OUT}", target2)
-
-	expected := "java -jar plz-out/bin/path/to/target2.py -o ${OUT}"
-	assert.Equal(t, expected, replaceSequences(state, target1))
-}
-
 func TestReplacementsForTest(t *testing.T) {
 	target2 := makeTarget2("//path/to:target2", "", nil)
 	target1 := makeTarget2("//path/to:target1", "$(exe //path/to:target1) $(location //path/to:target2)", target2)
@@ -128,7 +108,7 @@ func TestToolReplacement(t *testing.T) {
 	target1.Tools = append(target1.Tools, target2.Label)
 
 	wd, _ := os.Getwd()
-	expected := quote(path.Join(wd, "plz-out/gen/path/to/target2.py"))
+	expected := quote(filepath.Join(wd, "plz-out/gen/path/to/target2.py"))
 	cmd, _ := ReplaceSequences(state, target1, target1.Command)
 	assert.Equal(t, expected, cmd)
 }
@@ -139,7 +119,7 @@ func TestToolReplacementSubrepo(t *testing.T) {
 	target1.Tools = append(target1.Tools, target2.Label)
 
 	wd, _ := os.Getwd()
-	expected := quote(path.Join(wd, "plz-out/gen/subrepo/path/to/target2.py"))
+	expected := quote(filepath.Join(wd, "plz-out/gen/subrepo/path/to/target2.py"))
 	cmd, _ := ReplaceSequences(state, target1, target1.Command)
 	assert.Equal(t, expected, cmd)
 }
@@ -171,7 +151,7 @@ func TestToolDirReplacement(t *testing.T) {
 	target1.Tools = append(target1.Tools, target2.Label)
 
 	wd, _ := os.Getwd()
-	expected := quote(path.Join(wd, "plz-out/gen/path/to"))
+	expected := quote(filepath.Join(wd, "plz-out/gen/path/to"))
 	cmd, _ := ReplaceSequences(state, target1, target1.Command)
 	assert.Equal(t, expected, cmd)
 }

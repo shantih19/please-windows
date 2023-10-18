@@ -10,12 +10,12 @@ import (
 	"regexp"
 	"testing"
 
+	"cloud.google.com/go/longrunning/autogen/longrunningpb"
 	fpb "github.com/bazelbuild/remote-apis/build/bazel/remote/asset/v1"
 	pb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/bazelbuild/remote-apis/build/bazel/semver"
 	"github.com/peterebden/go-sri"
 	bs "google.golang.org/genproto/googleapis/bytestream"
-	"google.golang.org/genproto/googleapis/longrunning"
 	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -24,6 +24,7 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/thought-machine/please/src/cache"
 	"github.com/thought-machine/please/src/core"
 )
 
@@ -42,6 +43,7 @@ func newClientInstance(name string) *Client {
 	state := core.NewBuildState(config)
 	state.Config.Remote.URL = "127.0.0.1:9987"
 	state.Config.Remote.AssetURL = state.Config.Remote.URL
+	state.Cache = cache.NewCache(state)
 	return New(state)
 }
 
@@ -252,21 +254,21 @@ func (s *testServer) Execute(req *pb.ExecuteRequest, srv pb.Execution_ExecuteSer
 		a.MarshalFrom(msg)
 		return a
 	}
-	srv.Send(&longrunning.Operation{
+	srv.Send(&longrunningpb.Operation{
 		Name: "geoff",
 		Metadata: mm(&pb.ExecuteOperationMetadata{
 			Stage: pb.ExecutionStage_CACHE_CHECK,
 		}),
 	})
 	queued := timestamppb.Now()
-	srv.Send(&longrunning.Operation{
+	srv.Send(&longrunningpb.Operation{
 		Name: "geoff",
 		Metadata: mm(&pb.ExecuteOperationMetadata{
 			Stage: pb.ExecutionStage_QUEUED,
 		}),
 	})
 	start := timestamppb.Now()
-	srv.Send(&longrunning.Operation{
+	srv.Send(&longrunningpb.Operation{
 		Name: "geoff",
 		Metadata: mm(&pb.ExecuteOperationMetadata{
 			Stage: pb.ExecutionStage_EXECUTING,
@@ -281,13 +283,13 @@ func (s *testServer) Execute(req *pb.ExecuteRequest, srv pb.Execution_ExecuteSer
 	if req.InstanceName == "test" {
 		s.blobs["a4226cbd3e94a835ffcb5832ddd07eafe29e99494105b01d0df236bd8e9a15c3"] = testResults
 		s.blobs["a7f899acaabeaeecea132f782a5ebdddccd76fa1041f3e6d4a6e0d58638ffa0a"] = coverageData
-		srv.Send(&longrunning.Operation{
+		srv.Send(&longrunningpb.Operation{
 			Name: "geoff",
 			Metadata: mm(&pb.ExecuteOperationMetadata{
 				Stage: pb.ExecutionStage_COMPLETED,
 			}),
 			Done: true,
-			Result: &longrunning.Operation_Response{
+			Result: &longrunningpb.Operation_Response{
 				Response: mm(&pb.ExecuteResponse{
 					Result: &pb.ActionResult{
 						OutputFiles: []*pb.OutputFile{{
@@ -322,13 +324,13 @@ func (s *testServer) Execute(req *pb.ExecuteRequest, srv pb.Execution_ExecuteSer
 			},
 		})
 	} else if req.InstanceName == "mock" {
-		srv.Send(&longrunning.Operation{
+		srv.Send(&longrunningpb.Operation{
 			Name: "geoff",
 			Metadata: mm(&pb.ExecuteOperationMetadata{
 				Stage: pb.ExecutionStage_COMPLETED,
 			}),
 			Done: true,
-			Result: &longrunning.Operation_Response{
+			Result: &longrunningpb.Operation_Response{
 				Response: mm(&pb.ExecuteResponse{
 					Result: server.mockActionResult,
 					Status: &rpcstatus.Status{
@@ -339,13 +341,13 @@ func (s *testServer) Execute(req *pb.ExecuteRequest, srv pb.Execution_ExecuteSer
 		})
 	} else {
 		s.blobs["aaaf60fab1ff6b3d8147bafa3d29cb3e985cf0265cbf53705372eaabcd76c06b"] = []byte("what is the meaning of life, the universe, and everything?\n")
-		srv.Send(&longrunning.Operation{
+		srv.Send(&longrunningpb.Operation{
 			Name: "geoff",
 			Metadata: mm(&pb.ExecuteOperationMetadata{
 				Stage: pb.ExecutionStage_COMPLETED,
 			}),
 			Done: true,
-			Result: &longrunning.Operation_Response{
+			Result: &longrunningpb.Operation_Response{
 				Response: mm(&pb.ExecuteResponse{
 					Result: &pb.ActionResult{
 						OutputFiles: []*pb.OutputFile{{

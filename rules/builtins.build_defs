@@ -16,6 +16,10 @@ def build_rule(name:str, cmd:str|dict='', test_cmd:str|dict='', debug_cmd:str=''
                _subrepo:bool=False):
     pass
 
+def chr(i:int) -> str:
+    pass
+def ord(c:str) -> int:
+    pass
 def len(obj:list|dict|str) -> int:
     pass
 def enumerate(seq:list):
@@ -67,7 +71,8 @@ def subinclude(target:str):
     pass
 def load(target:str, names:str=None):
     pass
-def subrepo(name:str, dep:str='', path:str=None, config:str=None, bazel_compat:bool=False, arch:str=None, plugin:bool=False):
+def subrepo(name:str, dep:str='', path:str=None, config:str=None, bazel_compat:bool=False, arch:str=None,
+    plugin:bool=False, package_root:str=None):
     pass
 
 
@@ -77,17 +82,27 @@ def isinstance(obj, types:function|list) -> bool:
 
 def range(start:int, stop:int=None, step:int=1) -> str:
     pass
-def any(seq:list) -> bool:
-    for x in seq:
-        if x:
-            return True
-    return False
-def all(seq:list) -> bool:
-    for x in seq:
-        if not x:
-            return False
-    return True
 
+def any(seq:list) -> bool:
+    pass
+
+def all(seq:list) -> bool:
+    pass
+
+def min(seq:list, key:function=None):
+    pass
+
+def max(seq:list, key:function=None):
+    pass
+
+def filter(filter:function, seq:list):
+    pass
+
+def map(mapper:function, seq:list):
+    pass
+
+def reduce(function:function, seq:list, initializer=None):
+    pass
 
 def bool(b) -> bool:
     pass
@@ -99,9 +114,11 @@ def list(l):
     fail('list is not callable')
 def dict(d):
     fail('dict is not callable')
+def callable(f:function) -> bool:
+    return isinstance(f, callable)
 
 
-def glob(include:list|str, exclude:list|str&excludes=[], hidden:bool=CONFIG.BAZEL_COMPATIBILITY, include_symlinks:bool=not CONFIG.FF_EXCLUDE_GLOB_SYMLINKS) -> list:
+def glob(include:list|str, exclude:list|str&excludes=[], hidden:bool=CONFIG.BAZEL_COMPATIBILITY, include_symlinks:bool=False, allow_empty:bool=False) -> list:
     pass
 
 
@@ -111,6 +128,8 @@ def package():
 def sorted(seq:list) -> list:
     pass
 
+def reversed(seq:list) -> list:
+    pass
 
 def get(self:dict, key:str, default=None):
     pass
@@ -220,17 +239,6 @@ def dirname(p:str) -> str:
     return before
 
 
-def _deprecated_exception(msg):
-    log.warning('Builtin exception types are deprecated, please use fail() instead. ' +
-                'See https://github.com/thought-machine/please/issues/1598 for more information.')
-    return str(msg)
-
-# These are deprecated and will be removed in v17.
-ParseError = _deprecated_exception
-ConfigError = _deprecated_exception
-ValueError = _deprecated_exception
-
-
 # Post-build callback functions.
 def get_labels(name:str, prefix:str, all:bool=False, transitive=True) -> list:
     pass
@@ -247,6 +255,8 @@ def add_data(target:str, datum:str|list|dict):
 def add_out(target:str, name:str, out:str=''):
     pass
 def get_outs(target:str):
+    pass
+def get_named_outs(target:str) -> dict:
     pass
 def add_licence(target:str, licence:str):
     pass

@@ -68,7 +68,7 @@ func addTarget(state *core.BuildState, i int) *core.BuildTarget {
 			}
 		} else {
 			// These are buildable now
-			state.QueueTarget(target.Label, core.OriginalTarget, false)
+			state.QueueTarget(target.Label, core.OriginalTarget, false, core.ParseModeNormal)
 		}
 	}
 	return target
@@ -99,8 +99,12 @@ type fakeParser struct {
 	PostBuildFunctions buildFunctionMap
 }
 
+func (fake *fakeParser) RegisterPreload(core.BuildLabel) error {
+	return nil
+}
+
 // ParseFile stub
-func (fake *fakeParser) ParseFile(pkg *core.Package, filename string) error {
+func (fake *fakeParser) ParseFile(pkg *core.Package, label, dependent *core.BuildLabel, mode core.ParseMode, filename string) error {
 	return nil
 }
 
@@ -119,17 +123,17 @@ func (fake *fakeParser) Init(state *core.BuildState) {
 }
 
 // ParseReader stub
-func (fake *fakeParser) ParseReader(pkg *core.Package, r io.ReadSeeker) error {
+func (fake *fakeParser) ParseReader(pkg *core.Package, r io.ReadSeeker, label, dependent *core.BuildLabel, mode core.ParseMode) error {
 	return nil
 }
 
 // RunPreBuildFunction stub
-func (fake *fakeParser) RunPreBuildFunction(threadID int, state *core.BuildState, target *core.BuildTarget) error {
+func (fake *fakeParser) RunPreBuildFunction(state *core.BuildState, target *core.BuildTarget) error {
 	return nil
 }
 
 // RunPostBuildFunction stub
-func (fake *fakeParser) RunPostBuildFunction(threadID int, state *core.BuildState, target *core.BuildTarget, output string) error {
+func (fake *fakeParser) RunPostBuildFunction(state *core.BuildState, target *core.BuildTarget, output string) error {
 	if f, present := fake.PostBuildFunctions[target]; present {
 		return f(target, output)
 	}

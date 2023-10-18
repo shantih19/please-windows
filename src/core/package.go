@@ -2,13 +2,17 @@ package core
 
 import (
 	"fmt"
-	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
+	"github.com/thought-machine/please/src/cli"
 	"github.com/thought-machine/please/src/fs"
 )
+
+// Max levenshtein distance that we'll suggest at.
+const maxSuggestionDistance = 3
 
 // Package is a representation of a package, ie. the part of the system (one or more
 // directories) covered by a single build file.
@@ -147,10 +151,7 @@ func (pkg *Package) RegisterOutput(state *BuildState, fileName string, target *B
 		// Only local files are available as outputs to filegroups at this stage, so unless both targets are filegroups
 		// then the same output isn't allowed.
 		if !target.IsFilegroup || !existing.IsFilegroup {
-			// TODO(tiagovtristao): This condition exists for backwards compatibility and can be _fully_ deleted when the FF is removed.
-			if state.Config.FeatureFlags.PackageOutputsStrictness || !target.IsFilegroup && !existing.IsFilegroup {
-				return fmt.Errorf("rules %s and %s in %s both attempt to output the same file: %s", existing.Label, target.Label, pkg.Filename, originalFileName)
-			}
+			return fmt.Errorf("rules %s and %s in %s both attempt to output the same file: %s", existing.Label, target.Label, pkg.Filename, originalFileName)
 		}
 	}
 
@@ -212,7 +213,7 @@ func (pkg *Package) verifyOutputs() []string {
 	defer pkg.mutex.RUnlock()
 	ret := []string{}
 	for filename, target := range pkg.Outputs {
-		for dir := path.Dir(filename); dir != "."; dir = path.Dir(dir) {
+		for dir := filepath.Dir(filename); dir != "."; dir = filepath.Dir(dir) {
 			if target2, present := pkg.Outputs[dir]; present && target2 != target && !(target.HasDependency(target2.Label.Parent()) || target.HasDependency(target2.Label)) {
 				ret = append(ret, fmt.Sprintf("Target %s outputs files into the directory %s, which is separately output by %s. This can cause errors based on build order - you should add a dependency.", target.Label, dir, target2.Label))
 			}
@@ -223,12 +224,28 @@ func (pkg *Package) verifyOutputs() []string {
 
 // FindOwningPackage returns a build label identifying the package that owns a given file.
 func FindOwningPackage(state *BuildState, file string) BuildLabel {
-	f := path.Dir(file)
+	f := filepath.Dir(file)
 	for f != "." {
 		if fs.IsPackage(state.Config.Parse.BuildFileName, f) {
 			return BuildLabel{PackageName: f, Name: "all"}
 		}
-		f = path.Dir(f)
+		f = filepath.Dir(f)
 	}
 	return BuildLabel{PackageName: "", Name: "all"}
+}
+
+// suggestTargets suggests the targets in the given package that might be misspellings of
+// the requested one.
+func suggestTargets(pkg *Package, label, dependent BuildLabel) string {
+	// The initial haystack only contains target names
+	haystack := []string{}
+	for _, t := range pkg.AllTargets() {
+		haystack = append(haystack, fmt.Sprintf("//%s:%s", pkg.Name, t.Label.Name))
+	}
+	msg := cli.PrettyPrintSuggestion(label.String(), haystack, maxSuggestionDistance)
+	if pkg.Name != dependent.PackageName {
+		return msg
+	}
+	// Use relative package labels where possible.
+	return strings.ReplaceAll(msg, "//"+pkg.Name+":", ":")
 }

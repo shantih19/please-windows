@@ -4,9 +4,9 @@ go_library(
         "init.go",
         "internal_package.go",
         "parse_step.go",
-        "suggest.go",
     ],
-    resources = ["internal.tmpl"],
+    pgo_file = "//:pgo",
+    resources = glob(["internal.tmpl"]),
     visibility = ["PUBLIC"],
     deps = [
         "//rules",
@@ -16,8 +16,6 @@ go_library(
         "//src/core",
         "//src/fs",
         "//src/parse/asp",
-        "//src/worker",
-        "//third_party/go:semver",
     ],
 )
 
@@ -27,17 +25,7 @@ go_test(
     resources = ["internal.tmpl"],
     deps = [
         ":parse",
+        "///third_party/go/github.com_stretchr_testify//assert",
         "//src/core",
-        "//third_party/go:testify",
-    ],
-)
-
-go_test(
-    name = "suggest_test",
-    srcs = ["suggest_test.go"],
-    resources = ["internal.tmpl"],
-    deps = [
-        ":parse",
-        "//third_party/go:testify",
     ],
 )

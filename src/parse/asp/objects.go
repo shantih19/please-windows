@@ -1,7 +1,6 @@
 package asp
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -290,7 +289,7 @@ func (s pyString) Operator(operator Operator, operand pyObject) pyObject {
 	case NotIn:
 		return newPyBool(!strings.Contains(string(s), string(s2)))
 	case Index:
-		return pyString(s[pyIndex(s, operand, false)])
+		return pyString([]rune(s)[pyIndex(s, operand, false)])
 	}
 	panic("Unknown operator for string")
 }
@@ -631,18 +630,18 @@ func (f *pyFunc) String() string {
 	return fmt.Sprintf("<function %s>", f.name)
 }
 
-func (f *pyFunc) Call(ctx context.Context, s *scope, c *Call) pyObject {
+func (f *pyFunc) Call(s *scope, c *Call) pyObject {
 	if f.nativeCode != nil {
 		if f.kwargs {
-			return f.callNative(s.NewScope(), c)
+			return f.callNative(s.NewScope("<builtin code>", 0), c)
 		}
 		return f.callNative(s, c)
 	}
-	s2 := f.scope.NewPackagedScope(s.pkg, len(f.args)+1)
-	s2.ctx = ctx
+	s2 := f.scope.newScope(s.pkg, s.mode, f.scope.filename, len(f.args)+1)
 	s2.config = s.config
 	s2.Set("CONFIG", s.config) // This needs to be copied across too :(
 	s2.Callback = s.Callback
+	s2.parsingFor = s.parsingFor
 	// Handle implicit 'self' parameter for bound functions.
 	args := c.Arguments
 	if f.self != nil {
@@ -796,18 +795,13 @@ func (f *pyFunc) validateType(s *scope, i int, expr *Expression) pyObject {
 		return val
 	}
 	defer func() {
-		panic(AddStackFrame(expr.Pos, recover()))
+		panic(AddStackFrame(s.filename, expr.Pos, recover()))
 	}()
 	return s.Error("Invalid type for argument %s to %s; expected %s, was %s", f.args[i], f.name, strings.Join(f.types[i], " or "), actual)
 }
 
 type pyConfigBase struct {
 	dict pyDict
-
-	// While preloading, we might be mutating base with the plugin configs. During this time we must use mux to control
-	// access to base.
-	finalised bool
-	sync.RWMutex
 }
 
 // A pyConfig is a wrapper object around Please's global config.
@@ -821,8 +815,13 @@ type pyConfig struct {
 
 func (c *pyConfig) MarshalJSON() ([]byte, error) {
 	if c.overlay == nil {
-		return json.Marshal(c.overlay)
+		return json.Marshal(c.base.dict)
 	}
+
+	return json.Marshal(c.toPyDict())
+}
+
+func (c *pyConfig) toPyDict() pyDict {
 	merged := make(pyDict, len(c.base.dict)+len(c.overlay))
 	for k, v := range c.base.dict {
 		merged[k] = v
@@ -830,11 +829,11 @@ func (c *pyConfig) MarshalJSON() ([]byte, error) {
 	for k, v := range c.overlay {
 		merged[k] = v
 	}
-	return json.Marshal(merged)
+	return merged
 }
 
 func (c *pyConfig) String() string {
-	return "<global config object>"
+	return c.toPyDict().String()
 }
 
 func (c *pyConfig) Type() string {
@@ -892,11 +891,6 @@ func (c *pyConfig) Get(key string, fallback pyObject) pyObject {
 		if obj, present := c.overlay[key]; present {
 			return obj
 		}
-	}
-	// We may still be adding new config values to base when not finalised
-	if !c.base.finalised {
-		c.base.RLock()
-		defer c.base.RUnlock()
 	}
 
 	if obj, present := c.base.dict[key]; present {

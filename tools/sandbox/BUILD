@@ -1,3 +1,5 @@
+subinclude("///cc//build_defs:c", "///cc//build_defs:cc")
+
 c_library(
     name = "sandbox",
     srcs = ["sandbox.c"],
@@ -7,7 +9,7 @@ c_library(
 c_binary(
     name = "please_sandbox",
     srcs = ["main.c"],
-    static = (CONFIG.get("STATIC_SANDBOX") is not None),
+    static = ((CONFIG.get("STATIC_SANDBOX") is not None)),
     visibility = ["PUBLIC"],
     deps = [":sandbox"],
 )
@@ -15,7 +17,7 @@ c_binary(
 c_binary(
     name = "nonet_sandbox",
     srcs = ["nonet_main.c"],
-    static = (CONFIG.get("STATIC_SANDBOX") is not None),
+    static = ((CONFIG.get("STATIC_SANDBOX") is not None)),
     visibility = ["PUBLIC"],
     deps = [":sandbox"],
 )

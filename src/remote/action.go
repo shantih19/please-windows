@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -218,9 +218,9 @@ func (c *Client) uploadInputDir(ch chan<- *uploadinfo.Entry, target *core.BuildT
 					return nil, fmt.Errorf("Outputs not known for %s (should be built by now)", l)
 				}
 			}
-			pkgName := l.PackageName
+			pkgName := c.state.Graph.TargetOrDie(l).PackageDir()
 			if target.IsFilegroup {
-				pkgName = target.Label.PackageName
+				pkgName = target.PackageDir()
 			} else if isTest && l == target.Label {
 				// At test time the target itself is put at the root rather than in the normal dir.
 				// This is just How Things Are, so mimic it here.
@@ -229,29 +229,29 @@ func (c *Client) uploadInputDir(ch chan<- *uploadinfo.Entry, target *core.BuildT
 			// Recall that (as noted in setOutputs) these can have full paths on them, which
 			// we now need to sort out again to create well-formed Directory protos.
 			for _, f := range o.Files {
-				d := b.Dir(path.Join(pkgName, path.Dir(f.Name)))
+				d := b.Dir(filepath.Join(pkgName, filepath.Dir(f.Name)))
 				d.Files = append(d.Files, &pb.FileNode{
-					Name:         path.Base(f.Name),
+					Name:         filepath.Base(f.Name),
 					Digest:       f.Digest,
 					IsExecutable: f.IsExecutable,
 				})
 			}
 			for _, d := range o.Directories {
-				dir := b.Dir(path.Join(pkgName, path.Dir(d.Name)))
+				dir := b.Dir(filepath.Join(pkgName, filepath.Dir(d.Name)))
 				dir.Directories = append(dir.Directories, &pb.DirectoryNode{
-					Name:   path.Base(d.Name),
+					Name:   filepath.Base(d.Name),
 					Digest: d.Digest,
 				})
 				if target.IsFilegroup {
-					if err := c.addChildDirs(b, path.Join(pkgName, d.Name), d.Digest); err != nil {
+					if err := c.addChildDirs(b, filepath.Join(pkgName, d.Name), d.Digest); err != nil {
 						return b, err
 					}
 				}
 			}
 			for _, s := range o.Symlinks {
-				d := b.Dir(path.Join(pkgName, path.Dir(s.Name)))
+				d := b.Dir(filepath.Join(pkgName, filepath.Dir(s.Name)))
 				d.Symlinks = append(d.Symlinks, &pb.SymlinkNode{
-					Name:   path.Base(s.Name),
+					Name:   filepath.Base(s.Name),
 					Target: s.Target,
 				})
 			}
@@ -262,7 +262,7 @@ func (c *Client) uploadInputDir(ch chan<- *uploadinfo.Entry, target *core.BuildT
 		}
 	}
 	if !isTest && target.Stamp {
-		stamp := core.StampFile(target)
+		stamp := core.StampFile(c.state.Config, target)
 		entry := uploadinfo.EntryFromBlob(stamp)
 		if ch != nil {
 			ch <- entry
@@ -278,8 +278,8 @@ func (c *Client) uploadInputDir(ch chan<- *uploadinfo.Entry, target *core.BuildT
 
 // addChildDirs adds a set of child directories to a builder.
 func (c *Client) addChildDirs(b *dirBuilder, name string, dg *pb.Digest) error {
-	dir := &pb.Directory{}
-	if _, err := c.client.ReadProto(context.Background(), digest.NewFromProtoUnvalidated(dg), dir); err != nil {
+	dir, err := c.readDirectory(dg)
+	if err != nil {
 		return err
 	}
 	d := b.Dir(name)
@@ -288,7 +288,7 @@ func (c *Client) addChildDirs(b *dirBuilder, name string, dg *pb.Digest) error {
 	d.Symlinks = append(d.Symlinks, dir.Symlinks...)
 	d.NodeProperties = dir.NodeProperties
 	for _, subdir := range dir.Directories {
-		if err := c.addChildDirs(b, path.Join(name, subdir.Name), subdir.Digest); err != nil {
+		if err := c.addChildDirs(b, filepath.Join(name, subdir.Name), subdir.Digest); err != nil {
 			return err
 		}
 	}
@@ -307,8 +307,8 @@ func (c *Client) uploadInput(b *dirBuilder, ch chan<- *uploadinfo.Entry, input c
 			if isDir {
 				return nil // nothing to do
 			}
-			dest := path.Join(out, name[len(in):])
-			d := b.Dir(path.Dir(dest))
+			dest := filepath.Join(out, name[len(in):])
+			d := b.Dir(filepath.Dir(dest))
 			// Now handle the file itself
 			info, err := os.Lstat(name)
 			if err != nil {
@@ -320,7 +320,7 @@ func (c *Client) uploadInput(b *dirBuilder, ch chan<- *uploadinfo.Entry, input c
 					return err
 				}
 				d.Symlinks = append(d.Symlinks, &pb.SymlinkNode{
-					Name:   path.Base(dest),
+					Name:   filepath.Base(dest),
 					Target: link,
 				})
 				return nil
@@ -334,7 +334,7 @@ func (c *Client) uploadInput(b *dirBuilder, ch chan<- *uploadinfo.Entry, input c
 				SizeBytes: info.Size(),
 			}
 			d.Files = append(d.Files, &pb.FileNode{
-				Name:         path.Base(dest),
+				Name:         filepath.Base(dest),
 				Digest:       dg,
 				IsExecutable: info.Mode()&0100 != 0,
 			})
@@ -474,7 +474,7 @@ func (c *Client) verifyActionResult(target *core.BuildTarget, command *pb.Comman
 
 // uploadLocalTarget uploads the outputs of a target that was built locally.
 func (c *Client) uploadLocalTarget(target *core.BuildTarget) error {
-	m, ar, err := c.client.ComputeOutputsToUpload(target.OutDir(), target.Outputs(), filemetadata.NewNoopCache(), command.PreserveSymlink)
+	m, ar, err := c.client.ComputeOutputsToUpload(target.OutDir(), ".", target.Outputs(), filemetadata.NewNoopCache(), command.PreserveSymlink)
 	if err != nil {
 		return err
 	}

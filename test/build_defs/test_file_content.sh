@@ -1,13 +1,22 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
-if ! test -f "$1"; then
-  echo "$1" doesnt exist
+file=$1
+
+if ! test -f "$file"; then
+  echo "$file" doesnt exist
   exit 1
 fi
 
-CONTENT=$(cat "$1")
+CONTENT=$(<"$file")
+shift 1
+CHECK=$(< <(printf '%s\n' "$@"))
 
-if [ "$CONTENT" != "$2" ]; then
-  echo "$1" doesnt contain "$2", it contains "$CONTENT"
+if [[ "$CONTENT" != "$CHECK" ]]; then
+  printf '%s\n%s\n%s\n%s\n%s\n' \
+    "${file} doesnt contain" \
+    "${CHECK}" \
+    "---- it contains ----" \
+    "${CONTENT}" \
+    "---- EOF ----"
   exit 1
 fi

@@ -11,9 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,7 +30,7 @@ var cache core.Cache
 func TestBuildTargetWithNoDeps(t *testing.T) {
 	state, target := newState("//package1:target1")
 	target.AddOutput("file1")
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	assert.NoError(t, err)
 	assert.Equal(t, core.Built, target.State())
 }
@@ -40,7 +38,7 @@ func TestBuildTargetWithNoDeps(t *testing.T) {
 func TestFailedBuildTarget(t *testing.T) {
 	state, target := newState("//package1:target1a")
 	target.Command = "false"
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	assert.Error(t, err)
 }
 
@@ -49,7 +47,7 @@ func TestBuildTargetWhichNeedsRebuilding(t *testing.T) {
 	// because there's no rule hash file.
 	state, target := newState("//package1:target2")
 	target.AddOutput("file2")
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	assert.NoError(t, err)
 	assert.Equal(t, core.Built, target.State())
 }
@@ -60,7 +58,7 @@ func TestBuildTargetWhichDoesntNeedRebuilding(t *testing.T) {
 	target.AddOutput("file3")
 	StoreTargetMetadata(target, new(core.BuildMetadata))
 	assert.NoError(t, writeRuleHash(state, target))
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	assert.NoError(t, err)
 	assert.Equal(t, core.Reused, target.State())
 }
@@ -73,7 +71,7 @@ func TestModifiedBuildTargetStillNeedsRebuilding(t *testing.T) {
 	assert.NoError(t, writeRuleHash(state, target))
 	target.Command = "echo -n 'wibble wibble wibble' > $OUT"
 	target.RuleHash = nil // Have to force a reset of this
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	assert.NoError(t, err)
 	assert.Equal(t, core.Built, target.State())
 }
@@ -84,7 +82,7 @@ func TestSymlinkedOutputs(t *testing.T) {
 	target.AddOutput("file5")
 	target.AddSource(core.FileLabel{File: "src5", Package: "package1"})
 	target.Command = "ln -s $SRC $OUT"
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	assert.NoError(t, err)
 	assert.Equal(t, core.Built, target.State())
 }
@@ -98,7 +96,7 @@ func TestPreBuildFunction(t *testing.T) {
 		target.Command = "echo 'wibble wibble wibble' > $OUT"
 		return nil
 	})
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	assert.NoError(t, err)
 	assert.Equal(t, core.Built, target.State())
 }
@@ -112,7 +110,7 @@ func TestPostBuildFunction(t *testing.T) {
 		assert.Equal(t, "wibble wibble wibble", output)
 		return nil
 	})
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	assert.NoError(t, err)
 	assert.Equal(t, core.Built, target.State())
 	assert.Equal(t, []string{"file7"}, target.Outputs())
@@ -130,7 +128,7 @@ func TestOutputDir(t *testing.T) {
 
 	state, target := newTarget()
 
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"file7"}, target.Outputs())
 
@@ -142,7 +140,7 @@ func TestOutputDir(t *testing.T) {
 
 	// Run again to load the outputs from the metadata
 	state, target = newTarget()
-	err = buildTarget(1, state, target, false)
+	err = buildTarget(state, target, false)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"file7"}, target.Outputs())
 	assert.Equal(t, core.Reused, target.State())
@@ -165,7 +163,7 @@ func TestOutputDirDoubleStar(t *testing.T) {
 
 	state, target := newTarget(false)
 
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"foo"}, target.Outputs())
 
@@ -181,7 +179,7 @@ func TestOutputDirDoubleStar(t *testing.T) {
 
 	state, target = newTarget(true)
 
-	err = buildTarget(1, state, target, false)
+	err = buildTarget(state, target, false)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"foo/file7"}, target.Outputs())
 
@@ -196,7 +194,7 @@ func TestCacheRetrieval(t *testing.T) {
 	target.AddOutput("file8")
 	target.Command = "false" // Will fail if we try to build it.
 	state.Cache = cache
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	assert.NoError(t, err)
 	assert.Equal(t, core.Cached, target.State())
 }
@@ -214,7 +212,7 @@ func TestPostBuildFunctionAndCache(t *testing.T) {
 		return nil
 	})
 	state.Cache = cache
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	assert.NoError(t, err)
 	assert.Equal(t, core.Built, target.State())
 	assert.True(t, called)
@@ -234,7 +232,7 @@ func TestPostBuildFunctionAndCache2(t *testing.T) {
 		return nil
 	})
 	state.Cache = cache
-	err := buildTarget(1, state, target, false)
+	err := buildTarget(state, target, false)
 	assert.NoError(t, err)
 	assert.Equal(t, core.Cached, target.State())
 	assert.True(t, called)
@@ -277,7 +275,7 @@ func TestCreatePlzOutGo(t *testing.T) {
 	target.AddLabel("link:plz-out/go/${PKG}/src")
 	target.AddOutput("file1.go")
 	assert.False(t, fs.PathExists("plz-out/go"))
-	assert.NoError(t, buildTarget(1, state, target, false))
+	assert.NoError(t, buildTarget(state, target, false))
 	assert.True(t, fs.PathExists("plz-out/go/package1/src/file1.go"))
 }
 
@@ -347,9 +345,9 @@ func TestOutputHash(t *testing.T) {
 func TestCheckRuleHashes(t *testing.T) {
 	state, target := newState("//package3:target1")
 	target.AddOutput("file1")
-	target.Hashes = []string{"6c6d66a0852b49cdeeb0e183b4f10b0309c5dd4a"}
 
-	// This is the normal sha1-with-combine hash calculation
+	// This is the normal sha1 hash calculation with no combining.
+	target.Hashes = []string{"dba7673010f19a94af4345453005933fd511bea9"}
 	b, _ := state.TargetHasher.OutputHash(target)
 	err := checkRuleHashes(state, target, b)
 	assert.NoError(t, err)
@@ -412,7 +410,7 @@ func TestFetchLocalRemoteFile(t *testing.T) {
 
 	err := fetchRemoteFile(state, target)
 	assert.NoError(t, err)
-	assert.True(t, fs.FileExists(path.Join(target.TmpDir(), "local_remote_file.txt")))
+	assert.True(t, fs.FileExists(filepath.Join(target.TmpDir(), "local_remote_file.txt")))
 }
 
 func TestFetchLocalRemoteFileCannotBeRelative(t *testing.T) {
@@ -436,7 +434,7 @@ func TestBuildMetadatafileIsCreated(t *testing.T) {
 
 	state, target := newState("//package1:mdtest")
 	target.AddOutput("file1")
-	err := buildTarget(rand.Int(), state, target, false)
+	err := buildTarget(state, target, false)
 	require.NoError(t, err)
 	assert.False(t, target.BuildCouldModifyTarget())
 	assert.True(t, fs.FileExists(filepath.Join(target.OutDir(), target.TargetBuildMetadataFileName())))
@@ -448,7 +446,7 @@ func TestBuildMetadatafileIsCreated(t *testing.T) {
 		assert.Equal(t, stdOut, output)
 		return nil
 	})
-	err = buildTarget(rand.Int(), state, target, false)
+	err = buildTarget(state, target, false)
 	require.NoError(t, err)
 	assert.True(t, target.BuildCouldModifyTarget())
 	assert.True(t, fs.FileExists(filepath.Join(target.OutDir(), target.TargetBuildMetadataFileName())))
@@ -460,25 +458,16 @@ func TestBuildMetadatafileIsCreated(t *testing.T) {
 // Should return the hash of the first item
 func TestSha1SingleHash(t *testing.T) {
 	testCases := []struct {
-		name             string
-		algorithm        string
-		sha1ForceCombine bool
-		fooHash          string
-		fooAndBarHash    string
+		name          string
+		algorithm     string
+		fooHash       string
+		fooAndBarHash string
 	}{
 		{
-			name:             "sha1 no combine",
-			algorithm:        "sha1",
-			sha1ForceCombine: false,
-			fooHash:          "0beec7b5ea3f0fdbc95d0dd47f3c5bc275da8a33",
-			fooAndBarHash:    "4030c3573bf908b75420818b8c0b041443a3f21e",
-		},
-		{
-			name:             "sha1 force combine",
-			algorithm:        "sha1",
-			sha1ForceCombine: true,
-			fooHash:          "a7880a3d0e9799a88cf18ac67cb3ee19a7e43190",
-			fooAndBarHash:    "4030c3573bf908b75420818b8c0b041443a3f21e",
+			name:          "sha1 no combine",
+			algorithm:     "sha1",
+			fooHash:       "0beec7b5ea3f0fdbc95d0dd47f3c5bc275da8a33",
+			fooAndBarHash: "4030c3573bf908b75420818b8c0b041443a3f21e",
 		},
 		{
 			name:          "sha256",
@@ -508,7 +497,7 @@ func TestSha1SingleHash(t *testing.T) {
 
 	for _, test := range testCases {
 		t.Run(test.name+" foo", func(t *testing.T) {
-			state, target := newStateWithHashFunc("//hash_test:hash_test", test.algorithm, test.sha1ForceCombine)
+			state, target := newStateWithHashFunc("//hash_test:hash_test", test.algorithm)
 
 			target.AddOutput("foo.txt")
 
@@ -517,7 +506,7 @@ func TestSha1SingleHash(t *testing.T) {
 			assert.Equal(t, test.fooHash, hex.EncodeToString(h))
 		})
 		t.Run(test.name+" foo and bar", func(t *testing.T) {
-			state, target := newStateWithHashFunc("//hash_test:hash_test", test.algorithm, test.sha1ForceCombine)
+			state, target := newStateWithHashFunc("//hash_test:hash_test", test.algorithm)
 
 			target.AddOutput("foo.txt")
 			target.AddOutput("bar.txt")
@@ -548,10 +537,9 @@ func newStateWithHashCheckers(label, hashFunction string, hashCheckers ...string
 	return state, target
 }
 
-func newStateWithHashFunc(label, hashFunc string, sha1ForceCombine bool) (*core.BuildState, *core.BuildTarget) {
+func newStateWithHashFunc(label, hashFunc string) (*core.BuildState, *core.BuildTarget) {
 	config, _ := core.ReadConfigFiles(nil, nil)
 	config.Build.HashFunction = hashFunc
-	config.FeatureFlags.SingleSHA1Hash = !sha1ForceCombine
 	state := core.NewBuildState(config)
 	state.Config.Parse.BuildFileName = []string{"BUILD_FILE"}
 	target := core.NewBuildTarget(core.ParseBuildLabel(label, ""))
@@ -618,8 +606,12 @@ func (*mockCache) Shutdown()                      {}
 type fakeParser struct {
 }
 
+func (fake *fakeParser) RegisterPreload(core.BuildLabel) error {
+	return nil
+}
+
 // ParseFile stub
-func (fake *fakeParser) ParseFile(pkg *core.Package, filename string) error {
+func (fake *fakeParser) ParseFile(pkg *core.Package, label, dependent *core.BuildLabel, mode core.ParseMode, filename string) error {
 	return nil
 }
 
@@ -637,17 +629,17 @@ func (fake *fakeParser) NewParser(state *core.BuildState) {
 }
 
 // ParseReader stub
-func (fake *fakeParser) ParseReader(pkg *core.Package, r io.ReadSeeker) error {
+func (fake *fakeParser) ParseReader(pkg *core.Package, r io.ReadSeeker, label, dependent *core.BuildLabel, mode core.ParseMode) error {
 	return nil
 }
 
 // RunPreBuildFunction stub
-func (fake *fakeParser) RunPreBuildFunction(threadID int, state *core.BuildState, target *core.BuildTarget) error {
+func (fake *fakeParser) RunPreBuildFunction(state *core.BuildState, target *core.BuildTarget) error {
 	return target.PreBuildFunction.Call(target)
 }
 
 // RunPostBuildFunction stub
-func (fake *fakeParser) RunPostBuildFunction(threadID int, state *core.BuildState, target *core.BuildTarget, output string) error {
+func (fake *fakeParser) RunPostBuildFunction(state *core.BuildState, target *core.BuildTarget, output string) error {
 	return target.PostBuildFunction.Call(target, output)
 }
 
@@ -674,7 +666,7 @@ func TestMain(m *testing.M) {
 	logging.SetBackend(backend, backendLeveled)
 	// Move ourselves to the root of the test data tree
 	wd, _ := os.Getwd()
-	core.RepoRoot = path.Join(wd, "src/build/test_data")
+	core.RepoRoot = filepath.Join(wd, "src/build/test_data")
 	Init(core.NewDefaultBuildState())
 	if err := os.Chdir(core.RepoRoot); err != nil {
 		panic(err)

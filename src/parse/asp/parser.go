@@ -47,15 +47,6 @@ func newParser() *Parser {
 	}
 }
 
-// Finalise is called after all the builtins and preloaded subincludes have been loaded. It locks the base config so
-// that it can no longer be mutated.
-func (p *Parser) Finalise() {
-	p.interpreter.config.base.Lock()
-	defer p.interpreter.config.base.Unlock()
-
-	p.interpreter.config.base.finalised = true
-}
-
 // LoadBuiltins instructs the parser to load rules from this file as built-ins.
 // Optionally the file contents can be supplied directly.
 func (p *Parser) LoadBuiltins(filename string, contents []byte) error {
@@ -80,7 +71,7 @@ func (p *Parser) MustLoadBuiltins(filename string, contents []byte) {
 // ParseFile parses the contents of a single file in the BUILD language.
 // It returns true if the call was deferred at some point awaiting  target to build,
 // along with any error encountered.
-func (p *Parser) ParseFile(pkg *core.Package, filename string) error {
+func (p *Parser) ParseFile(pkg *core.Package, label, dependent *core.BuildLabel, mode core.ParseMode, filename string) error {
 	p.limiter.Acquire()
 	defer p.limiter.Release()
 
@@ -88,8 +79,7 @@ func (p *Parser) ParseFile(pkg *core.Package, filename string) error {
 	if err != nil {
 		return err
 	}
-
-	_, err = p.interpreter.interpretAll(pkg, statements)
+	_, err = p.interpreter.interpretAll(pkg, label, dependent, mode, statements)
 	if err != nil {
 		f, _ := os.Open(filename)
 		p.annotate(err, f)
@@ -97,30 +87,22 @@ func (p *Parser) ParseFile(pkg *core.Package, filename string) error {
 	return err
 }
 
-func (p *Parser) SubincludeTarget(state *core.BuildState, target *core.BuildTarget) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = handleErrors(r)
-		}
-	}()
+// RegisterPreload pre-registers a preload, forcing us to build any transitive preloads before we move on
+func (p *Parser) RegisterPreload(label core.BuildLabel) error {
 	p.limiter.Acquire()
 	defer p.limiter.Release()
-	subincludePkgState := state.Root()
-	if target.Subrepo != nil {
-		subincludePkgState = target.Subrepo.State
-	}
 
-	p.interpreter.loadPluginConfig(subincludePkgState, state, p.interpreter.config)
-	for _, out := range target.FullOutputs() {
-		p.interpreter.scope.SetAll(p.interpreter.Subinclude(out, target.Label), true)
-	}
-	return nil
+	// This is a throw away scope. We're just doing this to avoid race conditions setting this on the main scope.
+	s := p.interpreter.scope.newScope(nil, p.interpreter.scope.mode, "", 0)
+	s.config = p.interpreter.scope.config.Copy()
+	s.Set("CONFIG", s.config)
+	return p.interpreter.preloadSubinclude(s, label)
 }
 
 // ParseReader parses the contents of the given ReadSeeker as a BUILD file.
 // The first return value is true if parsing succeeds - if the error is still non-nil
 // that indicates that interpretation failed.
-func (p *Parser) ParseReader(pkg *core.Package, r io.ReadSeeker) (bool, error) {
+func (p *Parser) ParseReader(pkg *core.Package, r io.ReadSeeker, forLabel, dependent *core.BuildLabel, mode core.ParseMode) (bool, error) {
 	p.limiter.Acquire()
 	defer p.limiter.Release()
 
@@ -128,7 +110,7 @@ func (p *Parser) ParseReader(pkg *core.Package, r io.ReadSeeker) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	_, err = p.interpreter.interpretAll(pkg, stmts)
+	_, err = p.interpreter.interpretAll(pkg, forLabel, dependent, mode, stmts)
 	return true, err
 }
 

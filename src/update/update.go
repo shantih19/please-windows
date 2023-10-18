@@ -15,7 +15,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -75,7 +74,7 @@ func CheckAndUpdate(config *core.Configuration, updatesEnabled, updateCommand, f
 	}
 
 	// If the destination exists and the user passed --force, remove it to force a redownload.
-	newDir := path.Join(config.Please.Location, config.Please.Version.VersionString())
+	newDir := filepath.Join(config.Please.Location, config.Please.Version.VersionString())
 	if forceUpdate && core.PathExists(newDir) {
 		if err := os.RemoveAll(newDir); err != nil {
 			log.Fatalf("Failed to remove existing directory: %s", err)
@@ -187,13 +186,13 @@ func shouldUpdate(config *core.Configuration, updatesEnabled, updateCommand, pre
 // downloadAndLinkPlease downloads a new Please version and links it into place, if needed.
 // It returns the new location and dies on failure.
 func downloadAndLinkPlease(config *core.Configuration, verify bool, progress bool) string {
-	newPlease := path.Join(config.Please.Location, config.Please.Version.VersionString(), "please")
+	newPlease := filepath.Join(config.Please.Location, config.Please.Version.VersionString(), "please")
 
 	if !core.PathExists(newPlease) {
 		downloadPlease(config, verify, progress)
 	}
 	if !verifyNewPlease(newPlease, config.Please.Version.VersionString()) {
-		cleanDir(path.Join(config.Please.Location, config.Please.Version.VersionString()))
+		cleanDir(filepath.Join(config.Please.Location, config.Please.Version.VersionString()))
 		log.Fatalf("Not continuing.")
 	}
 	linkNewPlease(config)
@@ -201,7 +200,7 @@ func downloadAndLinkPlease(config *core.Configuration, verify bool, progress boo
 }
 
 func downloadPlease(config *core.Configuration, verify bool, progress bool) {
-	newDir := path.Join(config.Please.Location, config.Please.Version.VersionString())
+	newDir := filepath.Join(config.Please.Location, config.Please.Version.VersionString())
 	if err := os.MkdirAll(newDir, core.DirPermissions); err != nil {
 		log.Fatalf("Failed to create directory %s: %s", newDir, err)
 	}
@@ -231,30 +230,30 @@ func downloadPlease(config *core.Configuration, verify bool, progress bool) {
 	}
 	v := config.Please.Version.VersionString()
 	url = fmt.Sprintf("%s/%s_%s/%s/please_%s%s", url, runtime.GOOS, runtime.GOARCH, v, v, ext)
-	rc := mustDownload(url, progress)
-	defer mustClose(rc)
-	var r io.Reader = bufio.NewReader(rc)
+	pleaseReadCloser := mustDownload(url, progress)
+	defer mustClose(pleaseReadCloser)
+	var pleaseReader io.Reader = bufio.NewReader(pleaseReadCloser)
 
 	if len(config.Please.VersionChecksum) > 0 {
-		r = mustVerifyHash(r, config.Please.VersionChecksum)
+		pleaseReader = mustVerifyHash(pleaseReader, config.Please.VersionChecksum)
 	}
 
 	if verify && config.Please.Version.LessThan(minSignedVersion) {
 		log.Warning("Won't verify signature of download, version is too old to be signed.")
 	} else if verify {
-		r = verifyDownload(r, url, progress)
+		pleaseReader = verifyDownload(pleaseReader, url, progress)
 	} else {
 		log.Warning("Signature verification disabled for %s", url)
 	}
 
 	if shouldDownloadFullDist(config.Please.Version) {
-		xzr, err := xz.NewReader(r)
+		xzr, err := xz.NewReader(pleaseReader)
 		if err != nil {
 			panic(fmt.Sprintf("%s isn't a valid xzip file: %s", url, err))
 		}
 		copyTarFile(xzr, newDir, url)
 	} else {
-		copyFile(r, newDir)
+		copyFile(pleaseReader, newDir)
 	}
 }
 
@@ -305,7 +304,7 @@ func mustDownload(url string, progress bool) io.ReadCloser {
 }
 
 func linkNewPlease(config *core.Configuration) {
-	if files, err := os.ReadDir(path.Join(config.Please.Location, config.Please.Version.VersionString())); err != nil {
+	if files, err := os.ReadDir(filepath.Join(config.Please.Location, config.Please.Version.VersionString())); err != nil {
 		log.Fatalf("Failed to read directory: %s", err)
 	} else {
 		for _, file := range files {
@@ -315,9 +314,9 @@ func linkNewPlease(config *core.Configuration) {
 }
 
 func linkNewFile(config *core.Configuration, file string) {
-	newDir := path.Join(config.Please.Location, config.Please.Version.VersionString())
-	globalFile := path.Join(config.Please.Location, file)
-	downloadedFile := path.Join(newDir, file)
+	newDir := filepath.Join(config.Please.Location, config.Please.Version.VersionString())
+	globalFile := filepath.Join(config.Please.Location, file)
+	downloadedFile := filepath.Join(newDir, file)
 	if err := os.RemoveAll(globalFile); err != nil {
 		log.Fatalf("Failed to remove existing file %s: %s", globalFile, err)
 	}
@@ -389,8 +388,8 @@ func writeTarFile(hdr *tar.Header, r io.Reader, destination string) error {
 	// Strip the first directory component in the tarball
 
 	stripped := hdr.Name[strings.IndexRune(hdr.Name, os.PathSeparator)+1:]
-	dest := path.Join(destination, stripped)
-	if err := os.MkdirAll(path.Dir(dest), core.DirPermissions); err != nil {
+	dest := filepath.Join(destination, stripped)
+	if err := os.MkdirAll(filepath.Dir(dest), core.DirPermissions); err != nil {
 		return fmt.Errorf("Can't make destination directory: %s", err)
 	}
 	// Handle symlinks, but not other non-file things.

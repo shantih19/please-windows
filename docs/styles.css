@@ -1,54 +1,4 @@
-/*
-Fonts
-
-Note that these are commercially licensed, we have bought a licence for them for use on the site
-but as a result they're not checked into Git.
-*/
-/*
-@font-face {
-    font-family: 'EssentialPragmataPro-Bold';
-    src: url('/fonts/31B6AC_0_0.eot');
-    src: url('/fonts/31B6AC_0_0.eot?#iefix') format('embedded-opentype'),
-         url('/fonts/31B6AC_0_0.woff2') format('woff2'),
-         url('/fonts/31B6AC_0_0.woff') format('woff'),
-         url('/fonts/31B6AC_0_0.ttf') format('truetype');
-     font-display: swap;
-}
-*/
-@font-face {
-  font-family: "EssentialPragmataPro";
-  src: url("/fonts/31B6AC_1_0.eot");
-  src: url("/fonts/31B6AC_1_0.eot?#iefix") format("embedded-opentype"),
-    url("/fonts/31B6AC_1_0.woff2") format("woff2"),
-    url("/fonts/31B6AC_1_0.woff") format("woff"),
-    url("/fonts/31B6AC_1_0.ttf") format("truetype");
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Calibre";
-  src: url("/fonts/CalibreWeb-Regular.eot");
-  src: url("/fonts/CalibreWeb-Regular.woff2") format("woff2"),
-    url("/fonts/CalibreWeb-Regular.woff") format("woff");
-  font-display: swap;
-}
-
-/*
-@font-face {
-    font-family: 'Calibre-Bold';
-    src: url('/fonts/CalibreWeb-Bold.eot');
-    src: url('/fonts/CalibreWeb-Bold.woff2') format('woff2'),
-         url('/fonts/CalibreWeb-Bold.woff') format('woff');
-   font-display: swap;
-}
-*/
-@font-face {
-  font-family: "Calibre-Thin";
-  src: url("/fonts/CalibreWeb-Thin.eot");
-  src: url("/fonts/CalibreWeb-Thin.woff2") format("woff2"),
-    url("/fonts/CalibreWeb-Thin.woff") format("woff");
-  font-display: swap;
-}
+@import "fonts.css";
 
 :root {
   --blue: #29abe2;
@@ -71,6 +21,10 @@ but as a result they're not checked into Git.
   --violet: #af7dff;
   --white: #ffffff;
   --yellow: #ffe752;
+}
+
+body {
+  font-family: Roboto, Arial, sans-serif;
 }
 
 .smooth-scroll {
@@ -156,13 +110,6 @@ pre {
   font-family: "EssentialPragmataPro", monospace, sans-serif;
 }
 
-.calibre {
-  font-family: "Calibre", sans-serif;
-}
-
-.calibre-thin {
-  font-family: "Calibre-Thin", sans-serif;
-}
 
 .pre-wrap {
   white-space: pre-wrap;
@@ -411,23 +358,21 @@ ul.bulleted-list > li > * {
 /* Titles */
 .title-1 {
   color: var(--white);
-  font-family: "Calibre", sans-serif;
-  font-size: 1.5rem;
+  font-size: 3rem;
   font-weight: 400;
   line-height: 1.25;
   margin-bottom: 2rem;
 }
 .title-2 {
   color: var(--turquoise);
-  font-family: "Calibre", sans-serif;
-  font-size: 1.25rem;
+  font-size: 2rem;
   font-weight: 400;
   line-height: 1.25;
 }
+
 .title-3 {
   color: var(--turquoise);
-  font-family: "Calibre", sans-serif;
-  font-size: 1rem;
+  font-size: 1.5rem;
   font-weight: 400;
   line-height: 1.25;
 }
@@ -473,4 +418,8 @@ ul.bulleted-list > li > * {
 
 .please-build {
   font-size: 350%;
+}
+
+.code {
+  font-family: "EssentialPragmataPro", monospace, sans-serif;
 }

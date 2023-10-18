@@ -1,2 +1,8 @@
 [Parse]
-BuildFileName = BUILD_FILE
+BuildFileName = BUILD
+
+[Plugin "shell"]
+target = //plugins:shell
+
+[Plugin "go"]
+target = //plugins:go

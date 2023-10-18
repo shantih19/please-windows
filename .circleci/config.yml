@@ -3,7 +3,7 @@ jobs:
    build-alpine:
      working_directory: ~/please
      docker:
-       - image: thoughtmachine/please_alpine:20220803
+       - image: thoughtmachine/please_alpine:20230903
      resource_class: large
      environment:
        PLZ_ARGS: "-p --profile ci --profile alpine --exclude no-musl"
@@ -15,8 +15,6 @@ jobs:
            key: go-alpine-main-v7-{{ checksum "third_party/go/BUILD" }}
        - restore_cache:
            key: python-alpine-main-v2-{{ checksum "third_party/python/BUILD" }}
-       - restore_cache:
-           key: java-toolchain-alpine-v1-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/BUILD" }}-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/bazel_compat/BUILD" }}
        - run:
            name: Bootstrap & Build
            command: ./bootstrap.sh --test_results_file plz-out/results/please/test_results.xml
@@ -41,14 +39,11 @@ jobs:
        - save_cache:
            key: python-alpine-main-v2-{{ checksum "third_party/python/BUILD" }}
            paths: [ ".plz-cache/third_party/python" ]
-       - save_cache:
-           key: java-toolchain-alpine-v1-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/BUILD" }}-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/bazel_compat/BUILD" }}
-           paths: [ ".plz-cache/test/java_rules/java_toolchain" ]
 
    build-linux:
      working_directory: ~/please
      docker:
-       - image: thoughtmachine/please_ubuntu:20220803
+       - image: thoughtmachine/please_ubuntu:20230903
      resource_class: large
      environment:
        PLZ_ARGS: "-p --profile ci"
@@ -60,14 +55,9 @@ jobs:
            key: go-linux-main-v7-{{ checksum "third_party/go/BUILD" }}
        - restore_cache:
            key: python-linux-main-v2-{{ checksum "third_party/python/BUILD" }}
-       - restore_cache:
-           key: java-toolchain-linux-v1-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/BUILD" }}-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/bazel_compat/BUILD" }}
        - run:
            name: Bootstrap & Build
            command: ./bootstrap.sh --test_results_file plz-out/results/please/test_results.xml
-       - run:
-           name: No plugins
-           command: plz-out/bin/src/please build //package:installed_files && ./test.sh --profile noplugins --test_results_file plz-out/results/please/no_plugin.xml
        - store_test_results:
            path: plz-out/results
        - run:
@@ -84,6 +74,9 @@ jobs:
              - parse_perf_test.pex
        - store_artifacts:
            path: plz-out/log
+       - run:
+           name: Test perf framework
+           command: plz-out/bin/tools/performance/gen_parse_tree.pex --plz plz-out/bin/src/please --size 1 && plz-out/bin/tools/performance/parse_perf_test.pex --plz plz-out/bin/src/please -n 1
        - save_cache:
            key: go-mod-linux-v7-{{ checksum "go.mod" }}
            paths:
@@ -94,14 +87,11 @@ jobs:
        - save_cache:
            key: python-linux-main-v2-{{ checksum "third_party/python/BUILD" }}
            paths: [ ".plz-cache/third_party/python" ]
-       - save_cache:
-           key: java-toolchain-linux-v1-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/BUILD" }}-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/bazel_compat/BUILD" }}
-           paths: [ ".plz-cache/test/java_rules/java_toolchain" ]
 
    build-linux-alt:
      working_directory: ~/please
      docker:
-       - image: thoughtmachine/please_ubuntu_alt:20220803
+       - image: thoughtmachine/please_ubuntu_alt:20230903
      resource_class: large
      environment:
        PLZ_ARGS: "-p -c cover --profile ci-alt"
@@ -114,8 +104,6 @@ jobs:
            key: go-linux-alt-v6-{{ checksum "third_party/go/BUILD" }}
        - restore_cache:
            key: python-linux-alt-v2-{{ checksum "third_party/python/BUILD" }}
-       - restore_cache:
-           key: java-toolchain-linux-alt-v1-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/BUILD" }}-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/bazel_compat/BUILD" }}
        - run:
            name: Bootstrap & Build
            command: ./bootstrap.sh --test_results_file plz-out/results/please/test_results.xml
@@ -130,9 +118,6 @@ jobs:
        - save_cache:
            key: go-linux-alt-v6-{{ checksum "third_party/go/BUILD" }}
            paths: [ ".plz-cache/third_party/go" ]
-       - save_cache:
-           key: java-toolchain-linux-alt-v1-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/BUILD" }}-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/bazel_compat/BUILD" }}
-           paths: [ ".plz-cache/test/java_rules/java_toolchain" ]
        - save_cache:
            key: python-linux-alt-v2-{{ checksum "third_party/python/BUILD" }}
            paths: [ ".plz-cache/third_party/python" ]
@@ -151,7 +136,7 @@ jobs:
            command: tar -xzf /tmp/workspace/darwin_amd64/please_*.tar.gz
        - run:
            name: Cross-compile
-           command: ./please/please build -p --profile ci --arch darwin_arm64 -o go.cgoenabled:1 -o go.cgocctool:clang -o "go.cflags:-target arm64-apple-macos11" //package:release_files
+           command: ./please/please build -p --profile ci --arch darwin_arm64 -o plugin.go.cgoenabled:1 -o plugin.go.cctool:clang -o "plugin.go.cflags:-target arm64-apple-macos11" //package:release_files
        - persist_to_workspace:
            root: plz-out/pkg
            paths:
@@ -191,7 +176,7 @@ jobs:
    build-linux-arm64:
      working_directory: ~/please
      docker:
-       - image: thoughtmachine/please_ubuntu:20220803
+       - image: thoughtmachine/please_ubuntu:20230903
      resource_class: large
      steps:
        - checkout
@@ -227,8 +212,6 @@ jobs:
            key: go-darwin-go119-v1-{{ checksum "third_party/go/BUILD" }}
        - restore_cache:
            key: python-darwin-v3-{{ checksum "third_party/python/BUILD" }}
-       - restore_cache:
-           key: java-toolchain-darwin-v2-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/BUILD" }}-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/bazel_compat/BUILD" }}
        - run:
            name: Install deps
            command: ./.circleci/setup_osx.sh
@@ -258,15 +241,12 @@ jobs:
        - save_cache:
            key: python-darwin-v3-{{ checksum "third_party/python/BUILD" }}
            paths: [ ".plz-cache/third_party/python" ]
-       - save_cache:
-           key: java-toolchain-darwin-v2-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/BUILD" }}-{{ checksum "test/java_rules/java_toolchain/src/main/java/net/thoughtmachine/bazel_compat/BUILD" }}
-           paths: [ ".plz-cache/test/java_rules/java_toolchain" ]
 
    test-rex:
      working_directory: ~/please
      docker:
-       - image: thoughtmachine/please_ubuntu:20220516
-     resource_class: large
+       - image: thoughtmachine/please_ubuntu:20230903
+     resource_class: xlarge
      steps:
        - checkout
        - attach_workspace:
@@ -282,7 +262,7 @@ jobs:
    test-http-cache:
      working_directory: ~/please
      docker:
-       - image: thoughtmachine/please_ubuntu:20220516
+       - image: thoughtmachine/please_ubuntu:20230903
      resource_class: large
      steps:
        - checkout
@@ -298,19 +278,24 @@ jobs:
    # Releases to github and homebrew
    release:
      docker:
-       - image: thoughtmachine/please_docs:20220516
+       - image: thoughtmachine/please_docs:20230116
+     environment:
+       GOOGLE_APPLICATION_CREDENTIALS=/tmp/service_account.json
      steps:
        - attach_workspace:
            at: /tmp/workspace
        - add_ssh_keys:
            fingerprints:
              - "cc:57:b9:67:31:65:a6:70:8c:e3:e7:90:ca:e6:a6:41"
+       - run: echo $GCLOUD_SERVICE_KEY > $GOOGLE_APPLICATION_CREDENTIALS
        - run: /tmp/workspace/gen_release.pex --signer /tmp/workspace/release_signer /tmp/workspace/{*_amd64,*_arm64}/*
 
    # Releases the docs and the binaries to s3 for please.build and get.please.build
    release-s3:
      docker:
-       - image: thoughtmachine/please_docs:20220516
+       - image: thoughtmachine/please_docs:20230116
+     environment:
+       GOOGLE_APPLICATION_CREDENTIALS=/tmp/service_account.json
      steps:
        - checkout
        - attach_workspace:
@@ -320,7 +305,7 @@ jobs:
    # Runs a benchmarking test and records some performance results.
    perf-test:
      docker:
-       - image: thoughtmachine/please_ubuntu:20220516
+       - image: thoughtmachine/please_ubuntu:20230903
      resource_class: xlarge  # Want to run these tests with a significant amount of parallelism
      steps:
        - checkout
@@ -339,11 +324,6 @@ workflows:
       - build-darwin:
           requires:
             - build-alpine
-            - build-linux
-            - build-linux-alt
-      - build-darwin-arm64:
-          requires:
-            - build-darwin
       - build-freebsd:
           requires:
             - build-alpine
@@ -353,11 +333,18 @@ workflows:
       - test-http-cache:
           requires:
             - build-alpine
+      - build-linux-arm64:
+          requires:
+            - build-alpine
+      - build-darwin-arm64:
+          requires:
+            - build-darwin
       - release:
           requires:
             - build-alpine
             - build-freebsd
             - build-darwin-arm64
+            - build-linux-arm64
             - build-linux
             - build-linux-alt
             - build-darwin
@@ -368,14 +355,7 @@ workflows:
               only: master
       - release-s3:
           requires:
-            - build-alpine
-            - build-freebsd
-            - build-darwin-arm64
-            - build-linux
-            - build-linux-alt
-            - build-darwin
-            - test-rex
-            - test-http-cache
+            - release
           filters:
             branches:
               only: master

@@ -6,7 +6,8 @@ package main
 import (
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -47,7 +48,7 @@ func parseFile(pkg *core.Package, p *asp.Parser, filename string) error {
 		if opts.Check && err == nil {
 			if errs := checkAST(stmts); len(errs) != 0 {
 				for _, err := range errs {
-					printErr(err)
+					printErr(filename, err)
 				}
 				return fmt.Errorf("Errors found while checking %s", filename)
 			}
@@ -60,13 +61,54 @@ func parseFile(pkg *core.Package, p *asp.Parser, filename string) error {
 		}
 		return err
 	}
-	return p.ParseFile(pkg, filename)
+	return p.ParseFile(pkg, nil, nil, 0, filename)
 }
 
 type assignment struct {
 	Name string
 	Pos  asp.Position
 	Read bool // does it get read later on?
+}
+
+// walkASTMulti is like asp.WalkAST but accepts a sequence of callbacks.
+// Currently it's living here since we can't represent this nicely with generics.
+func walkASTMulti(ast []*asp.Statement, callback ...interface{}) {
+	types := make([]reflect.Type, len(callback))
+	callbacks := make([]reflect.Value, len(callback))
+	for i, cb := range callback {
+		v := reflect.ValueOf(cb)
+		types[i] = v.Type().In(0)
+		callbacks[i] = v
+	}
+	for _, node := range ast {
+		walkAST(reflect.ValueOf(node), types, callbacks)
+	}
+}
+
+func walkAST(v reflect.Value, types []reflect.Type, callbacks []reflect.Value) {
+	call := func(v reflect.Value) bool {
+		for i, typ := range types {
+			if v.Type() == typ {
+				vs := callbacks[i].Call([]reflect.Value{v})
+				return vs[0].Bool()
+			}
+		}
+		return true
+	}
+
+	if v.Kind() == reflect.Ptr && !v.IsNil() {
+		walkAST(v.Elem(), types, callbacks)
+	} else if v.Kind() == reflect.Slice {
+		for i := 0; i < v.Len(); i++ {
+			walkAST(v.Index(i), types, callbacks)
+		}
+	} else if v.Kind() == reflect.Struct {
+		if call(v.Addr()) {
+			for i := 0; i < v.NumField(); i++ {
+				walkAST(v.Field(i), types, callbacks)
+			}
+		}
+	}
 }
 
 // checkAST runs some static checks on a loaded AST.
@@ -84,7 +126,7 @@ func checkAST(stmts []*asp.Statement, parentScopes ...map[string]assignment) (er
 		}
 	}
 
-	asp.WalkAST(stmts, func(ident *asp.IdentStatement) bool {
+	walkASTMulti(stmts, func(ident *asp.IdentStatement) bool {
 		if ident.Action != nil && ident.Action.Assign != nil {
 			if _, present := assigns[ident.Name]; !present {
 				assigns[ident.Name] = assignment{Name: ident.Name, Pos: ident.Action.Assign.Pos}
@@ -114,14 +156,14 @@ func checkAST(stmts []*asp.Statement, parentScopes ...map[string]assignment) (er
 		}
 	}
 	sort.Slice(errs, func(i, j int) bool {
-		return errs[i].Pos.Line < errs[j].Pos.Line
+		return errs[i].Pos < errs[j].Pos
 	})
 	return errs
 }
 
-func printErr(err assignment) {
-	stack := asp.AddStackFrame(err.Pos, fmt.Errorf("Variable %s is written but never read", err.Name))
-	if f, err := os.Open(err.Pos.Filename); err == nil {
+func printErr(filename string, err assignment) {
+	stack := asp.AddStackFrame(filename, err.Pos, fmt.Errorf("Variable %s is written but never read", err.Name))
+	if f, err := os.Open(filename); err == nil {
 		defer f.Close()
 		stack = asp.AddReader(stack, f)
 	}
@@ -161,9 +203,7 @@ func main() {
 	config := core.DefaultConfiguration()
 	if !opts.NoConfig {
 		var err error
-		config, err = core.ReadConfigFiles([]string{
-			path.Join(core.MustFindRepoRoot(), core.ConfigFileName),
-		}, nil)
+		config, err = core.ReadConfigFiles([]string{filepath.Join(core.MustFindRepoRoot(), core.ConfigFileName)}, nil)
 		if err != nil {
 			log.Fatalf("%s", err)
 		}
@@ -182,7 +222,7 @@ func main() {
 	p := asp.NewParser(state)
 
 	log.Debug("Loading built-in build rules...")
-	dir, _ := rules.AllAssets(state.ExcludedBuiltinRules())
+	dir, _ := rules.AllAssets()
 	sort.Strings(dir)
 	for _, filename := range dir {
 		src, _ := rules.ReadAsset(filename)

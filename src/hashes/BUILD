@@ -1,6 +1,7 @@
 go_library(
     name = "hashes",
     srcs = ["rewrite_hashes.go"],
+    pgo_file = "//:pgo",
     visibility = ["PUBLIC"],
     deps = [
         "//src/cli/logging",
@@ -17,8 +18,8 @@ go_test(
     ],
     deps = [
         ":hashes",
+        "///third_party/go/github.com_stretchr_testify//assert",
         "//src/core",
         "//src/fs",
-        "//third_party/go:testify",
     ],
 )

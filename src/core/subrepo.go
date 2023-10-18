@@ -2,10 +2,8 @@ package core
 
 import (
 	"fmt"
-	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/thought-machine/please/src/cli"
 )
@@ -17,6 +15,8 @@ type Subrepo struct {
 	Name string
 	// The root directory to load it from.
 	Root string
+	// A root directory for outputs of this subrepo's targets
+	PackageRoot string
 	// If this repo is output by a target, this is the target that creates it. Can be nil.
 	Target *BuildTarget
 	// The build state instance that tracks this subrepo (it's different from the host one if
@@ -26,20 +26,30 @@ type Subrepo struct {
 	Arch cli.Arch
 	// True if this subrepo was created for a different architecture
 	IsCrossCompile bool
-	// loadConfig is used to control when we load plugin configuration. We need access to the subrepo itself to do this
-	// so it happens at build time.
-	loadConfig            sync.Once
+	// AdditionalConfigFiles corresponds to the config parameter on `subrepo()`
 	AdditionalConfigFiles []string
+}
+
+func NewSubrepo(state *BuildState, name, root string, target *BuildTarget, arch cli.Arch, isCrosscompile bool) *Subrepo {
+	return &Subrepo{
+		Name:           name,
+		Root:           root,
+		State:          state,
+		Target:         target,
+		Arch:           arch,
+		IsCrossCompile: isCrosscompile,
+	}
 }
 
 // SubrepoForArch creates a new subrepo for the given architecture.
 func SubrepoForArch(state *BuildState, arch cli.Arch) *Subrepo {
-	return &Subrepo{
-		Name:           arch.String(),
-		State:          state.ForArch(arch),
-		Arch:           arch,
-		IsCrossCompile: true,
+	s := NewSubrepo(state.ForArch(arch), arch.String(), "", nil, arch, true)
+	if err := s.State.Initialise(s); err != nil {
+		// We always return nil as we shortcut loading config for architecture subrepos, but check non-the-less incase
+		// somebody changes something.
+		log.Fatalf("%v", err)
 	}
+	return s
 }
 
 // SubrepoArchName returns the subrepo name augmented for the given architecture
@@ -47,42 +57,32 @@ func SubrepoArchName(subrepo string, arch cli.Arch) string {
 	return subrepo + "_" + arch.String()
 }
 
-// Dir returns the directory for a package of this name.
-func (s *Subrepo) Dir(dir string) string {
-	return path.Join(s.Root, dir)
+// LabelToArch converts the provided label to the given architecture
+func LabelToArch(label BuildLabel, arch cli.Arch) BuildLabel {
+	if label.Subrepo == "" {
+		label.Subrepo = arch.String()
+		return label
+	}
+	if strings.HasSuffix(label.Subrepo, arch.String()) {
+		return label
+	}
+	label.Subrepo = SubrepoArchName(label.Subrepo, arch)
+	return label
 }
 
-func readConfigFilesInto(config, repoConfig *Configuration, files []string) error {
-	for _, file := range files {
-		err := readConfigFile(config, file, true)
-		if err != nil {
-			return err
-		}
+// Dir returns the directory for a package of this name.
+func (s *Subrepo) Dir(dir string) string {
+	return filepath.Join(s.Root, dir)
+}
 
-		err = readConfigFile(repoConfig, file, true)
+func readConfigFilesInto(repoConfig *Configuration, files []string) error {
+	for _, file := range files {
+		err := readConfigFile(repoConfig, file, true)
 		if err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// LoadSubrepoConfig will load the .plzconfig from the subrepo. We can only do this once the subrepo is built hence why
-// it's not done up front.
-func (s *Subrepo) LoadSubrepoConfig() (err error) {
-	s.loadConfig.Do(func() {
-		s.State.RepoConfig = &Configuration{}
-
-		err = readConfigFilesInto(s.State.Config, s.State.RepoConfig, append(s.AdditionalConfigFiles, filepath.Join(s.Root, ".plzconfig")))
-		if err != nil {
-			return
-		}
-		if err = validateSubrepoNameAndPluginConfig(s.State.Config, s.State.RepoConfig, s); err != nil {
-			return
-		}
-		go s.State.Parser.Init(s.State)
-	})
-	return
 }
 
 func validateSubrepoNameAndPluginConfig(config, repoConfig *Configuration, subrepo *Subrepo) error {
@@ -106,7 +106,7 @@ func validateSubrepoNameAndPluginConfig(config, repoConfig *Configuration, subre
 	if plugin := config.Plugin[subrepo.Name]; plugin != nil {
 		for key := range plugin.ExtraValues {
 			if _, ok := definedKeys[strings.ToLower(key)]; !ok {
-				return fmt.Errorf("Unrecognised config key %q for plugin %q %v %v", key, subrepo.Name, plugin.ExtraValues, definedKeys)
+				return fmt.Errorf("Unrecognised config key %q for plugin %q", key, subrepo.Name)
 			}
 		}
 	}
