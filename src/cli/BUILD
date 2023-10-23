@@ -8,7 +8,7 @@ go_library(
         "prompt.go",
         "replacements.go",
         "suggest.go",
-        "winch_other.go",
+        "winch_windows.go" if CONFIG.OS == "windows" else "winch_other.go",
         "window.go",
     ],
     pgo_file = "//:pgo",

@@ -1,8 +1,7 @@
 go_library(
     name = "process",
     srcs = [
-        "exec_linux.go",
-        "exec_other.go",
+        "exec_linux.go" if CONFIG.OS == "linux" else "exec_windows.go" if CONFIG.OS == "windows" else "exec_other.go",
         "output.go",
         "process.go",
         "progress.go",

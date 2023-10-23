@@ -363,7 +363,7 @@ go_repo(
 
 go_repo(
     module = "golang.org/x/sys",
-    version = "v0.0.0-20220315194320-039c03cc5b86",
+    version = "v0.12.0",
 )
 
 go_repo(
@@ -566,4 +566,14 @@ go_repo(
 go_repo(
     module = "github.com/jstemmer/go-junit-report/v2",
     version = "v2.0.0",
+)
+
+go_repo(
+    module="github.com/yusufpapurcu/wmi",
+    version="v1.2.2"
+)
+
+go_repo(
+    module="github.com/go-ole/go-ole",
+    version="v1.3.0"
 )

@@ -342,21 +342,6 @@ func TestInterpreterLen(t *testing.T) {
 	s, err := parseFile("src/parse/asp/test_data/interpreter/len.build")
 	assert.NoError(t, err)
 	assert.EqualValues(t, "sync", s.Lookup("y"))
-	assert.EqualValues(t, 4, s.Lookup("l1"))
-	assert.EqualValues(t, 6, s.Lookup("l2"))
-	assert.EqualValues(t, 5, s.Lookup("l3"))
-	assert.EqualValues(t, 2, s.Lookup("l4"))
-}
-
-func TestInterpreterIndex(t *testing.T) {
-	t.Run("String indexing", func(t *testing.T) {
-		s, err := parseFile("src/parse/asp/test_data/interpreter/index_string.build")
-		assert.NoError(t, err)
-		assert.EqualValues(t, pyString("l"), s.Lookup("c1"))
-		assert.EqualValues(t, pyString("n"), s.Lookup("c2"))
-		assert.EqualValues(t, pyString("\u043d"), s.Lookup("c3"))
-		assert.EqualValues(t, pyString("\u0637"), s.Lookup("c4"))
-	})
 }
 
 func TestInterpreterFStringDollars(t *testing.T) {
@@ -499,51 +484,6 @@ func TestMax(t *testing.T) {
 			assert.EqualValues(t, pyString("three"), s.Lookup(fmt.Sprintf("s%d", i)))
 		}
 		assert.EqualValues(t, pyString("one"), s.Lookup("s7"))
-	})
-}
-
-func TestChr(t *testing.T) {
-	t.Run("OK", func(t *testing.T) {
-		s, err := parseFile("src/parse/asp/test_data/interpreter/chr.build")
-		assert.NoError(t, err)
-		assert.EqualValues(t, pyString("\x00"), s.Lookup("null"))
-		assert.EqualValues(t, pyString("a"), s.Lookup("a"))
-		assert.EqualValues(t, pyString("€"), s.Lookup("euro"))
-		assert.EqualValues(t, pyString("\U0010FFFF"), s.Lookup("maximum"))
-	})
-	t.Run("Wrong parameter type", func(t *testing.T) {
-		_, err := parseFile("src/parse/asp/test_data/interpreter/chr_wrong_type.build")
-		assert.ErrorContains(t, err, "Invalid type for argument i to chr; expected int, was str")
-	})
-	t.Run("Parameter out of bounds (too low)", func(t *testing.T) {
-		_, err := parseFile("src/parse/asp/test_data/interpreter/chr_bounds_low.build")
-		assert.ErrorContains(t, err, "Argument i must be within the Unicode code point range")
-	})
-	t.Run("Parameter out of bounds (too high)", func(t *testing.T) {
-		_, err := parseFile("src/parse/asp/test_data/interpreter/chr_bounds_high.build")
-		assert.ErrorContains(t, err, "Argument i must be within the Unicode code point range")
-	})
-}
-
-func TestOrd(t *testing.T) {
-	t.Run("OK", func(t *testing.T) {
-		s, err := parseFile("src/parse/asp/test_data/interpreter/ord.build")
-		assert.NoError(t, err)
-		assert.EqualValues(t, pyInt(97), s.Lookup("a"))
-		assert.EqualValues(t, pyInt(8364), s.Lookup("euro"))
-		assert.EqualValues(t, pyInt(8984), s.Lookup("cmd"))
-	})
-	t.Run("Wrong parameter type", func(t *testing.T) {
-		_, err := parseFile("src/parse/asp/test_data/interpreter/ord_wrong_type.build")
-		assert.ErrorContains(t, err, "Invalid type for argument c to ord; expected str, was int")
-	})
-	t.Run("Parameter too short", func(t *testing.T) {
-		_, err := parseFile("src/parse/asp/test_data/interpreter/ord_empty.build")
-		assert.ErrorContains(t, err, "Argument c must be a string containing a single Unicode character")
-	})
-	t.Run("Parameter out of bounds (too high)", func(t *testing.T) {
-		_, err := parseFile("src/parse/asp/test_data/interpreter/ord_multiple.build")
-		assert.ErrorContains(t, err, "Argument c must be a string containing a single Unicode character")
 	})
 }
 

@@ -1,4 +1,4 @@
-subinclude("//build_defs:foo")
+subinclude("//test/windows/build_defs:foo")
 
 foo_library(
     name = "foo",

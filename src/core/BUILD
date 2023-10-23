@@ -16,6 +16,7 @@ go_library(
         "cycle_detector.go",
         "graph.go",
         "lock.go",
+        "lock_windows.go" if CONFIG.OS == "windows" else "lock_other.go",
         "package.go",
         "previous_op.go",
         "resources.go",

@@ -5,6 +5,7 @@ go_library(
         "copy.go",
         "executable.go",
         "fs.go",
+        "fs_windows.go" if CONFIG.OS == "windows" else "fs_unix.go",
         "glob.go",
         "hash.go",
         "home.go",

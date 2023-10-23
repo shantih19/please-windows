@@ -5,5 +5,6 @@ python_test(
     flags = select({
         "//test/config_rules/config:x86_64": "--arch=x86_64",
         "//test/config_rules/config:x86": "--arch=x86",
+        "//test/config_rules/config:arm64": "--arch=arm64",
     }),
 )

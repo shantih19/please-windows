@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"unicode"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/manifoldco/promptui"
@@ -48,8 +47,6 @@ func registerBuiltins(s *scope) {
 	setNativeCode(s, "all", allFunc)
 	setNativeCode(s, "min", min)
 	setNativeCode(s, "max", max)
-	setNativeCode(s, "chr", chr)
-	setNativeCode(s, "ord", ord)
 	setNativeCode(s, "len", lenFunc)
 	setNativeCode(s, "glob", glob)
 	setNativeCode(s, "bool", boolType)
@@ -400,23 +397,9 @@ func objLen(obj pyObject) pyInt {
 	case pyFrozenDict:
 		return pyInt(len(t.pyDict))
 	case pyString:
-		return pyInt(len([]rune(t)))
+		return pyInt(len(t))
 	}
 	panic("object of type " + obj.Type() + " has no len()")
-}
-
-func chr(s *scope, args []pyObject) pyObject {
-	i, isInt := args[0].(pyInt)
-	s.Assert(isInt, "Argument i must be an integer, not %s", args[0].Type())
-	s.Assert(i >= 0 && i <= unicode.MaxRune, "Argument i must be within the Unicode code point range")
-	return pyString(rune(i))
-}
-
-func ord(s *scope, args []pyObject) pyObject {
-	c, isStr := args[0].(pyString)
-	s.Assert(isStr, "Argument c must be a string, not %s", args[0].Type())
-	s.Assert(objLen(c) == 1, "Argument c must be a string containing a single Unicode character")
-	return pyInt([]rune(c)[0])
 }
 
 func isinstance(s *scope, args []pyObject) pyObject {

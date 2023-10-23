@@ -3,6 +3,7 @@ package fs
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/pkg/xattr"
 )
